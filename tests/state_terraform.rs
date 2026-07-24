@@ -103,3 +103,34 @@ fn rejects_plan_output_rather_than_reporting_empty() {
         "got: {err:?}"
     );
 }
+
+#[test]
+fn parses_real_terraform_output() {
+    // Unlike the hand-written fixtures, this file is verbatim
+    // `terraform show -json` output (Terraform v1.9.8, terraform_data
+    // resources, one nested module) — the schema assumption checked against
+    // the real thing.
+    let resources = parse(include_str!("fixtures/real_terraform_output.json")).unwrap();
+
+    let addresses: Vec<&str> = resources.iter().map(|r| r.id.0.as_str()).collect();
+    assert_eq!(
+        addresses,
+        ["terraform_data.web", "module.nested.terraform_data.inner"]
+    );
+
+    // The ResourceId-vs-cloud-ID invariant against real output: the id is
+    // the Terraform address, while cloud_id() yields the UUID Terraform
+    // actually assigned at apply time.
+    assert_eq!(
+        resources[0].cloud_id(),
+        Some("f812d70c-ed5b-2d31-751f-ad2e28f64e7b")
+    );
+    assert_eq!(
+        resources[1].cloud_id(),
+        Some("580d8daa-e225-008c-bf26-235c0da6593c")
+    );
+
+    for r in &resources {
+        assert_eq!(r.kind, ResourceKind::Other("terraform_data".to_string()));
+    }
+}
