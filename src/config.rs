@@ -1,17 +1,18 @@
-//! Configuration: config-file loading merged with CLI flag resolution.
+//! Configuration: CLI flag resolution (config-file layering comes later).
 
 /// Resolved runtime configuration.
-///
-/// Built by layering CLI flags on top of any config file, on top of defaults.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
-    // TODO: config fields (state source, provider selection, store path, ...).
+    /// Path to `terraform show -json` output; `-` means stdin.
+    pub state_path: String,
 }
 
 impl Config {
-    /// Resolve configuration from defaults, config file, and CLI flags.
-    pub fn resolve() -> crate::Result<Self> {
-        // TODO: load config file + overlay CLI flags.
-        Ok(Self::default())
+    /// Resolve configuration from CLI arguments.
+    ///
+    /// A config file layer (defaults < file < flags) is planned; for now the
+    /// flags are the whole story.
+    pub fn resolve(state_path: String) -> crate::Result<Self> {
+        Ok(Self { state_path })
     }
 }

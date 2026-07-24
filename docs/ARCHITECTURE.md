@@ -137,6 +137,12 @@ the code compiles.
   mutates cloud resources or Terraform state. This is what makes "detection
   only" an architectural guarantee rather than a convention.
 
+- **Collectors return observations keyed by cloud ID, never by Terraform
+  address.** A collector talking to a cloud API cannot know Terraform
+  addresses; it returns `LiveResource`s keyed by cloud ID, and only the diff
+  joins them to declared resources — via `Resource::cloud_id()`, never via
+  `ResourceId`.
+
 - **Encrypted or unreadable state is a hard failure, not a parse error.**
   OpenTofu (and some Terraform setups) can encrypt state at rest. uncia does
   not hold decryption keys and must not try to partially parse, guess at, or
