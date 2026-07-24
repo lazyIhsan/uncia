@@ -1,0 +1,54 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.9.5",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_security_group.edge",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "edge",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": { "id": "sg-edge00000000000" },
+          "sensitive_values": {}
+        }
+      ],
+      "child_modules": [
+        {
+          "address": "module.network",
+          "resources": [
+            {
+              "address": "module.network.aws_security_group.internal",
+              "mode": "managed",
+              "type": "aws_security_group",
+              "name": "internal",
+              "provider_name": "registry.terraform.io/hashicorp/aws",
+              "schema_version": 1,
+              "values": { "id": "sg-internal0000000" },
+              "sensitive_values": {}
+            }
+          ],
+          "child_modules": [
+            {
+              "address": "module.network.module.private",
+              "resources": [
+                {
+                  "address": "module.network.module.private.aws_instance.db",
+                  "mode": "managed",
+                  "type": "aws_instance",
+                  "name": "db",
+                  "provider_name": "registry.terraform.io/hashicorp/aws",
+                  "schema_version": 1,
+                  "values": { "id": "i-db00000000000000" },
+                  "sensitive_values": {}
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

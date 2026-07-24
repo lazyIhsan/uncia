@@ -16,9 +16,12 @@ name = "uncia"
 path = "src/main.rs"
 
 [dependencies]
-# Dependencies are intentionally omitted while the module surface is stubbed out.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
 # Likely additions as implementation lands:
-#   serde / serde_json  — terraform show -json parsing, config
-#   rusqlite            — drift history persistence (store::sqlite)
-#   ratatui / crossterm — terminal UI (tui)
-#   clap                — CLI flag parsing (config, main)
+#   aws-config / aws-sdk-ec2 — AWS collectors (collector::aws)
+#   tokio / async-trait      — async Collector trait
+#   rusqlite                 — drift history persistence (store::sqlite)
+#   ratatui / crossterm      — terminal UI (tui)
+#   clap                     — CLI flag parsing (config, main)
