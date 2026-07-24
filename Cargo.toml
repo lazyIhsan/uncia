@@ -2,5 +2,23 @@
 name = "uncia"
 version = "0.1.0"
 edition = "2024"
+description = "Drift detection for IaC that goes beyond value diffs — catches infrastructure that looks unchanged but no longer means what it used to."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/lazyihsan/uncia"
+
+[lib]
+name = "uncia"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uncia"
+path = "src/main.rs"
 
 [dependencies]
+# Dependencies are intentionally omitted while the module surface is stubbed out.
+# Likely additions as implementation lands:
+#   serde / serde_json  — terraform show -json parsing, config
+#   rusqlite            — drift history persistence (store::sqlite)
+#   ratatui / crossterm — terminal UI (tui)
+#   clap                — CLI flag parsing (config, main)
