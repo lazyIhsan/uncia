@@ -1,4 +1,4 @@
-//! AWS provider implementation.
+//! AWS collector implementation.
 
 pub mod ec2;
 pub mod security_group;
