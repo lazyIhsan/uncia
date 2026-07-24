@@ -1,0 +1,80 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.9.5",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_security_group.web",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "web",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "sg-0123456789abcdef0",
+            "name": "web",
+            "description": "web tier",
+            "vpc_id": "vpc-0aa11bb22cc33dd44",
+            "ingress": [
+              {
+                "from_port": 443,
+                "to_port": 443,
+                "protocol": "tcp",
+                "cidr_blocks": ["0.0.0.0/0"],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": false,
+                "description": ""
+              }
+            ],
+            "egress": [],
+            "tags": { "Name": "web" }
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_instance.web",
+          "mode": "managed",
+          "type": "aws_instance",
+          "name": "web",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "i-0abc123def4567890",
+            "instance_type": "t3.medium",
+            "ami": "ami-0aabbccdd11223344",
+            "tags": { "Name": "web" }
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_s3_bucket.assets",
+          "mode": "managed",
+          "type": "aws_s3_bucket",
+          "name": "assets",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "id": "assets-bucket",
+            "bucket": "assets-bucket"
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "data.aws_ami.ubuntu",
+          "mode": "data",
+          "type": "aws_ami",
+          "name": "ubuntu",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 0,
+          "values": {
+            "id": "ami-0aabbccdd11223344"
+          },
+          "sensitive_values": {}
+        }
+      ]
+    }
+  }
+}
