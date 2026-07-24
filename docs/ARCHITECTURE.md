@@ -10,9 +10,10 @@ uncia is a **control-plane drift detector**. It compares two pictures of your
 infrastructure:
 
 - **Declared intent** — what your IaC says should exist, read from
-  `terraform show -json` (`src/state/terraform.rs`).
+  `terraform show -json` (and the identical `tofu show -json`) in
+  `src/state/terraform.rs`.
 - **Control-plane reality** — what the cloud provider's APIs report actually
-  exists, read through collectors (`src/provider/`).
+  exists, read through collectors (`src/collector/`).
 
 It diffs the two (`src/diff/`), produces a drift report (`src/types/drift.rs`),
 and persists history so drift can be tracked over time (`src/store/`).
@@ -69,7 +70,7 @@ drift earns the right to be in the room; semantic drift is why anyone stays.
 uncia is developed as open core across two repositories.
 
 - **`uncia`** (this repo, public) — the core engine: the drift and resource
-  types, the diff engine, the collectors (the `Provider` trait and its
+  types, the diff engine, the collectors (the `Collector` trait and its
   implementations), the CLI, and the TUI. Everything needed to detect and
   inspect drift against your own cloud accounts lives here and is auditable.
 - **`unciaroot`** (private) — the differentiated intelligence layer: semantic
@@ -110,10 +111,14 @@ here is a deliberate boundary, not a forgotten feature.
   *Revisit never for the core diff; any anomaly-scoring would live in
   `unciaroot` as an advisory layer, not in the deterministic engine.*
 
-- **No multi-IaC support in v1.** Terraform state only. Pulumi, CloudFormation,
-  and others are deferred.
-  *Revisit once the resource model has stabilized against Terraform; the
-  `state` module is the seam where another format would plug in.*
+- **Multi-IaC beyond the Terraform state schema is out of scope for v1.** uncia
+  reads the Terraform JSON state schema. **OpenTofu is in scope** — `tofu show
+  -json` emits the same schema, so it works through the same code path at
+  effectively no cost, and is supported as a first-class input. Pulumi,
+  CloudFormation, and other formats with different schemas are deferred.
+  *Revisit (Pulumi/CFN) once the resource model has stabilized against the
+  Terraform schema; the `state` module is the seam where another schema would
+  plug in.*
 
 ## Invariants
 
@@ -132,10 +137,29 @@ the code compiles.
   mutates cloud resources or Terraform state. This is what makes "detection
   only" an architectural guarantee rather than a convention.
 
+- **Encrypted or unreadable state is a hard failure, not a parse error.**
+  OpenTofu (and some Terraform setups) can encrypt state at rest. uncia does
+  not hold decryption keys and must not try to partially parse, guess at, or
+  silently skip state it cannot read — doing so would produce a confidently
+  wrong report in which every resource looks deleted. Encountering encrypted or
+  otherwise unreadable state must fail loudly with a clear message, never
+  degrade to an empty or partial parse.
+
 ## Open questions
 
 Deliberately undecided. Recorded here so "unresolved" is distinguishable from
 "forgotten."
+
+- **How does uncia tell *intentional* drift from *meaningful* drift?** Someone
+  changing prod on purpose (a hotfix, an ASG scaling event, a break-glass fix)
+  and the effective security posture shifting are both "drift," but only one of
+  them should raise alarm. This is the noise-vs-signal question that decides
+  whether uncia becomes a trusted audit tool or gets muted in two weeks, and it
+  is **distinct from severity**: severity asks *how bad*, intentionality asks
+  *was this expected*. Where does the signal come from — change-source
+  attribution (e.g. CloudTrail actor/principal), an approvals or change-window
+  feed, an explicit allow-list of expected drift, or the IaC-intent model
+  itself?
 
 - **How is semantic drift's dependency graph built?** Resolving "sg-abc's
   membership changed" means knowing which resources a rule effectively depends
@@ -143,8 +167,8 @@ Deliberately undecided. Recorded here so "unresolved" is distinguishable from
   relationships, or both — and where does it live, `uncia` or `unciaroot`?
 
 - **What is the collector interface's exact contract** once there is more than
-  one AWS service and, eventually, more than one cloud? The `Provider` trait is
-  a starting point, not a settled boundary.
+  one AWS service and, eventually, more than one cloud? The `Collector` trait
+  is a starting point, not a settled boundary.
 
 - **How is drift severity assigned?** `Severity` exists on the type, but the
   policy that maps a given drift to a severity is unspecified. Static rules,

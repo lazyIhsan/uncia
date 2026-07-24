@@ -6,10 +6,10 @@
 //! This is the public API surface for the crate. It contains **re-exports only**;
 //! all behaviour lives in the submodules below.
 
+pub mod collector;
 pub mod config;
 pub mod diff;
 pub mod error;
-pub mod provider;
 pub mod state;
 pub mod store;
 pub mod tui;
