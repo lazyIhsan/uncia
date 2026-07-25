@@ -120,6 +120,19 @@ here is a deliberate boundary, not a forgotten feature.
   Terraform schema; the `state` module is the seam where another schema would
   plug in.*
 
+- **Security-group rules are checked only when declared inline.** The
+  `aws_security_group` collector compares a group's live rules against the
+  `ingress`/`egress` blocks declared inline on that group. Rules declared as
+  *separate* resources — `aws_security_group_rule`, or the newer
+  `aws_vpc_security_group_ingress_rule` / `_egress_rule` — leave the group's
+  inline blocks empty in state, so uncia would compare live rules against an
+  empty declared set and report every rule as drift; those separate rule
+  resources are also uncovered (`ResourceKind::Other`) and not checked. Only
+  inline-rule security groups are supported in v1.
+  *Revisit by giving the diff a notion of rules contributed by sibling
+  resources, so a group and its separately-declared rules are reconciled as
+  one effective rule set before comparison.*
+
 ## Invariants
 
 Small facts that are expensive to rediscover. Violating one is a bug even if
@@ -136,6 +149,12 @@ the code compiles.
 - **Collectors are read-only.** A collector fetches live state and never
   mutates cloud resources or Terraform state. This is what makes "detection
   only" an architectural guarantee rather than a convention.
+
+- **Collectors return observations keyed by cloud ID, never by Terraform
+  address.** A collector talking to a cloud API cannot know Terraform
+  addresses; it returns `LiveResource`s keyed by cloud ID, and only the diff
+  joins them to declared resources — via `Resource::cloud_id()`, never via
+  `ResourceId`.
 
 - **Encrypted or unreadable state is a hard failure, not a parse error.**
   OpenTofu (and some Terraform setups) can encrypt state at rest. uncia does

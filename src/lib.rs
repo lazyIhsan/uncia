@@ -15,6 +15,7 @@ pub mod store;
 pub mod tui;
 pub mod types;
 
+pub use collector::{Collector, LiveResource};
 pub use config::Config;
 pub use error::{Result, UnciaError};
 pub use types::drift::{Drift, DriftKind, DriftReport, Severity};
