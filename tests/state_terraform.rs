@@ -78,9 +78,16 @@ fn rejects_encrypted_state() {
 }
 
 #[test]
-fn rejects_raw_tfstate_file() {
+fn raw_tfstate_is_not_show_json() {
+    // A raw .tfstate has no `format_version`, so this parser reports it as an
+    // unrecognized document rather than reading it as empty. Routing raw state
+    // to the parser that *can* read it is `state::parse`'s job — see
+    // `tests/state_tfstate.rs` and `tests/state_equivalence.rs`.
     let err = parse(include_str!("fixtures/raw_tfstate.json")).unwrap_err();
-    assert!(matches!(err, UnciaError::RawStateFile), "got: {err:?}");
+    assert!(
+        matches!(&err, UnciaError::UnsupportedFormatVersion { found } if found == "(none)"),
+        "got: {err:?}"
+    );
 }
 
 #[test]

@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "terraform_version": "0.11.14",
+  "serial": 2,
+  "lineage": "3f8a1c2e-0000-1111-2222-333344445555",
+  "modules": [
+    {
+      "path": ["root"],
+      "outputs": {},
+      "resources": {
+        "aws_instance.web": {
+          "type": "aws_instance",
+          "primary": { "id": "i-legacy0000000000" }
+        }
+      }
+    }
+  ],
+  "resources": []
+}

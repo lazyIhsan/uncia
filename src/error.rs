@@ -23,11 +23,8 @@ pub enum UnciaError {
     )]
     EncryptedState,
 
-    #[error(
-        "state input looks like a raw .tfstate file; run `terraform show -json` \
-         (or `tofu show -json`) and pass its output instead"
-    )]
-    RawStateFile,
+    #[error("unsupported .tfstate schema version `{found}`; expected 4")]
+    UnsupportedStateVersion { found: u64 },
 
     #[error(
         "state input is a plan, not state (found `{marker}`); run \
