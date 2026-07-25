@@ -8,7 +8,7 @@
 //! `DriftReport::unjoinable` so "no drift" and "couldn't check" stay
 //! distinguishable.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::Value;
 
@@ -20,9 +20,32 @@ use crate::types::resource::{Resource, ResourceKind};
 const SECURITY_GROUP_FIELDS: &[&str] =
     &["name", "description", "vpc_id", "tags", "ingress", "egress"];
 
+/// Fields compared for `aws_instance` (the security-focused v1 field set).
+const INSTANCE_FIELDS: &[&str] = &[
+    "instance_type",
+    "ami",
+    "tags",
+    "vpc_security_group_ids",
+    "iam_instance_profile",
+    "metadata_options",
+];
+
 /// Fields holding rule lists, compared as exploded atom sets rather than by
 /// value equality (rule order and grouping are not meaningful).
 const RULE_FIELDS: &[&str] = &["ingress", "egress"];
+
+/// Fields holding an unordered set of strings, compared order-insensitively.
+const SET_FIELDS: &[&str] = &["vpc_security_group_ids"];
+
+/// Keys within `metadata_options` that uncia understands and compares. Extra
+/// keys in state (e.g. provider-version additions like `http_protocol_ipv6`)
+/// are ignored so they don't read as false drift.
+const METADATA_OPTION_KEYS: &[&str] = &[
+    "http_endpoint",
+    "http_tokens",
+    "http_put_response_hop_limit",
+    "instance_metadata_tags",
+];
 
 /// Compare declared resources against live observations and report drift.
 pub fn compare(declared: &[Resource], live: &[LiveResource]) -> DriftReport {
@@ -81,6 +104,10 @@ pub fn compare(declared: &[Resource], live: &[LiveResource]) -> DriftReport {
 
             let equal = if RULE_FIELDS.contains(field) {
                 explode_rules(&declared_value) == explode_rules(&actual_value)
+            } else if SET_FIELDS.contains(field) {
+                as_string_set(&declared_value) == as_string_set(&actual_value)
+            } else if *field == "metadata_options" {
+                metadata_subset(&declared_value) == metadata_subset(&actual_value)
             } else {
                 declared_value == actual_value
             };
@@ -107,8 +134,37 @@ pub fn compare(declared: &[Resource], live: &[LiveResource]) -> DriftReport {
 fn fields_for(kind: &ResourceKind) -> &'static [&'static str] {
     match kind {
         ResourceKind::AwsSecurityGroup => SECURITY_GROUP_FIELDS,
+        ResourceKind::AwsInstance => INSTANCE_FIELDS,
         _ => &[],
     }
+}
+
+/// Collect a JSON array of strings into a set, ignoring order and duplicates.
+fn as_string_set(value: &Value) -> BTreeSet<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Reduce a `metadata_options` value (Terraform's one-element block) to just
+/// the keys uncia understands, so provider-version extras don't read as drift.
+fn metadata_subset(value: &Value) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    let block = value
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(Value::as_object);
+    if let Some(block) = block {
+        for key in METADATA_OPTION_KEYS {
+            if let Some(v) = block.get(*key) {
+                out.insert((*key).to_string(), v.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Explode a rule list into a canonical set of atoms, one per

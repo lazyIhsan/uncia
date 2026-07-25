@@ -192,3 +192,150 @@ fn tags_all_is_preferred_over_tags_when_present() {
     let report = compare(&declared, &live);
     assert!(report.drifts.is_empty(), "{:?}", report.drifts);
 }
+
+// --- EC2 instances ---
+
+fn declared_instance(address: &str, values: Value) -> Resource {
+    Resource {
+        id: ResourceId(address.to_string()),
+        kind: ResourceKind::AwsInstance,
+        attributes: attrs(values),
+    }
+}
+
+fn live_instance(cloud_id: &str, values: Value) -> LiveResource {
+    LiveResource {
+        cloud_id: cloud_id.to_string(),
+        kind: ResourceKind::AwsInstance,
+        attributes: attrs(values),
+    }
+}
+
+fn instance_meta(http_tokens: &str) -> Value {
+    json!([{
+        "http_endpoint": "enabled",
+        "http_tokens": http_tokens,
+        "http_put_response_hop_limit": 1,
+        "instance_metadata_tags": "disabled",
+    }])
+}
+
+fn base_instance(id: &str, instance_type: &str, sgs: Value, http_tokens: &str) -> Value {
+    json!({
+        "id": id, "instance_type": instance_type, "ami": "ami-1",
+        "tags": {"Name": "web"}, "vpc_security_group_ids": sgs,
+        "iam_instance_profile": "app-role", "metadata_options": instance_meta(http_tokens),
+    })
+}
+
+#[test]
+fn instance_type_change_is_drift() {
+    let declared = [declared_instance(
+        "aws_instance.web",
+        base_instance("i-1", "t3.medium", json!(["sg-a"]), "required"),
+    )];
+    let live = [live_instance(
+        "i-1",
+        base_instance("i-1", "t3.large", json!(["sg-a"]), "required"),
+    )];
+
+    let report = compare(&declared, &live);
+    assert_eq!(report.drifts.len(), 1);
+    assert!(matches!(
+        &report.drifts[0].kind,
+        DriftKind::FieldChanged { field, declared, actual }
+            if field == "instance_type" && declared == "t3.medium" && actual == "t3.large"
+    ));
+}
+
+#[test]
+fn security_group_id_order_is_not_drift() {
+    let declared = [declared_instance(
+        "aws_instance.web",
+        base_instance("i-1", "t3.medium", json!(["sg-a", "sg-b"]), "required"),
+    )];
+    let live = [live_instance(
+        "i-1",
+        base_instance("i-1", "t3.medium", json!(["sg-b", "sg-a"]), "required"),
+    )];
+
+    let report = compare(&declared, &live);
+    assert!(report.drifts.is_empty(), "{:?}", report.drifts);
+}
+
+#[test]
+fn changed_security_group_attachment_is_drift() {
+    let declared = [declared_instance(
+        "aws_instance.web",
+        base_instance("i-1", "t3.medium", json!(["sg-a"]), "required"),
+    )];
+    // An SG was swapped out from under Terraform.
+    let live = [live_instance(
+        "i-1",
+        base_instance("i-1", "t3.medium", json!(["sg-b"]), "required"),
+    )];
+
+    let report = compare(&declared, &live);
+    assert_eq!(report.drifts.len(), 1);
+    assert!(matches!(
+        &report.drifts[0].kind,
+        DriftKind::FieldChanged { field, .. } if field == "vpc_security_group_ids"
+    ));
+}
+
+#[test]
+fn imdsv2_downgrade_is_drift() {
+    // http_tokens required -> optional re-opens IMDSv1: a posture change.
+    let declared = [declared_instance(
+        "aws_instance.web",
+        base_instance("i-1", "t3.medium", json!(["sg-a"]), "required"),
+    )];
+    let live = [live_instance(
+        "i-1",
+        base_instance("i-1", "t3.medium", json!(["sg-a"]), "optional"),
+    )];
+
+    let report = compare(&declared, &live);
+    assert_eq!(report.drifts.len(), 1);
+    assert!(matches!(
+        &report.drifts[0].kind,
+        DriftKind::FieldChanged { field, .. } if field == "metadata_options"
+    ));
+}
+
+#[test]
+fn extra_metadata_key_in_state_is_not_drift() {
+    // A newer provider adds http_protocol_ipv6 to the block; the live side
+    // (which uncia builds) doesn't emit it. It must not read as drift.
+    let mut declared_meta = instance_meta("required");
+    declared_meta[0]
+        .as_object_mut()
+        .unwrap()
+        .insert("http_protocol_ipv6".to_string(), json!("disabled"));
+
+    let declared = [declared_instance(
+        "aws_instance.web",
+        json!({"id": "i-1", "instance_type": "t3.medium", "ami": "ami-1",
+               "tags": {"Name": "web"}, "vpc_security_group_ids": ["sg-a"],
+               "iam_instance_profile": "app-role", "metadata_options": declared_meta}),
+    )];
+    let live = [live_instance(
+        "i-1",
+        base_instance("i-1", "t3.medium", json!(["sg-a"]), "required"),
+    )];
+
+    let report = compare(&declared, &live);
+    assert!(report.drifts.is_empty(), "{:?}", report.drifts);
+}
+
+#[test]
+fn declared_instance_absent_from_live_is_missing() {
+    let declared = [declared_instance(
+        "aws_instance.gone",
+        base_instance("i-gone", "t3.medium", json!(["sg-a"]), "required"),
+    )];
+
+    let report = compare(&declared, &[]);
+    assert_eq!(report.drifts.len(), 1);
+    assert!(matches!(report.drifts[0].kind, DriftKind::Missing));
+}

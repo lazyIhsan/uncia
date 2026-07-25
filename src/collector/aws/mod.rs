@@ -30,7 +30,8 @@ impl Collector for AwsCollector {
     }
 
     async fn fetch(&self) -> crate::Result<Vec<LiveResource>> {
-        // Security groups only for now; ec2 instances are the next kind.
-        security_group::fetch(&self.client).await
+        let mut out = security_group::fetch(&self.client).await?;
+        out.extend(ec2::fetch(&self.client).await?);
+        Ok(out)
     }
 }
