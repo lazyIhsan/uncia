@@ -15,6 +15,21 @@ half gets tested without a round trip to a real account for every change.
 Everything except the last two runs in CI on every push (`cargo test
 --all-targets`).
 
+## Files
+
+| Path | What |
+|---|---|
+| `tests/collector_replay.rs` | replay tests — collectors against recorded AWS bytes |
+| `tests/recordings/` | the recordings themselves (see status below) |
+| `examples/capture_recording.rs` | records + scrubs a new recording from a real account |
+| `scripts/localstack.sh` | `up` / `down` / `status` for the LocalStack target |
+| `infra/` | the two container-runtime definitions the script picks between |
+
+There is deliberately no `make` wrapper for `cargo test` / `cargo clippy` —
+cargo is the build tool, and a second spelling of the same commands only
+invites the two to disagree. `scripts/localstack.sh` exists because container
+orchestration is the one part cargo has no answer for.
+
 ## Replay harness
 
 The collectors' unit tests build `SecurityGroup` / `Instance` values with SDK
@@ -77,9 +92,9 @@ and you have a real state file and a live cloud to diff against, with no AWS
 account at all. Mutate something with `awslocal` and drift appears.
 
 ```sh
-make localstack-up      # podman quadlet if available, else docker compose
-make localstack-status
-make localstack-down
+scripts/localstack.sh up       # podman quadlet if available, else docker compose
+scripts/localstack.sh status
+scripts/localstack.sh down
 ```
 
 Two runtimes ship because they win in different places:
