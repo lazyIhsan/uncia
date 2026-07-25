@@ -120,6 +120,19 @@ here is a deliberate boundary, not a forgotten feature.
   Terraform schema; the `state` module is the seam where another schema would
   plug in.*
 
+- **Security-group rules are checked only when declared inline.** The
+  `aws_security_group` collector compares a group's live rules against the
+  `ingress`/`egress` blocks declared inline on that group. Rules declared as
+  *separate* resources — `aws_security_group_rule`, or the newer
+  `aws_vpc_security_group_ingress_rule` / `_egress_rule` — leave the group's
+  inline blocks empty in state, so uncia would compare live rules against an
+  empty declared set and report every rule as drift; those separate rule
+  resources are also uncovered (`ResourceKind::Other`) and not checked. Only
+  inline-rule security groups are supported in v1.
+  *Revisit by giving the diff a notion of rules contributed by sibling
+  resources, so a group and its separately-declared rules are reconciled as
+  one effective rule set before comparison.*
+
 ## Invariants
 
 Small facts that are expensive to rediscover. Violating one is a bug even if
