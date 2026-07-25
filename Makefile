@@ -1,17 +1,18 @@
-.PHONY: test check localstack-up localstack-down localstack-status help
+# Only what cargo can't do on its own. Plain `cargo test` / `cargo clippy`
+# stay the normal entry points — there are deliberately no aliases for them.
+.PHONY: check localstack-up localstack-down localstack-status help
 
 UNCIA_TEST_ENDPOINT ?= http://localhost:4566
 QUADLET_DIR := $(HOME)/.config/containers/systemd
 
 help:
-	@echo "test            - full offline suite (no container runtime needed)"
-	@echo "check           - fmt + clippy + test, as CI runs them"
+	@echo "check           - pre-push convenience: fmt + clippy + tests"
 	@echo "localstack-up   - start LocalStack (podman quadlet if available, else docker)"
 	@echo "localstack-down - stop it"
+	@echo "localstack-status - is it answering?"
 
-test:
-	cargo test --all-targets
-
+# A pre-push shortcut, not a mirror of CI. `.github/workflows/ci.yml` is the
+# authority on what gates a merge; if the two ever disagree, believe CI.
 check:
 	cargo fmt --all --check
 	cargo clippy --all-targets -- -D warnings
