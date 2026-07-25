@@ -35,16 +35,7 @@ pub fn parse(json: &str) -> crate::Result<Vec<Resource>> {
         return Err(UnciaError::EncryptedState);
     }
 
-    // Guard 3: a raw .tfstate file (schema `version: 4`, no `format_version`)
-    // rather than `show -json` output.
-    if doc.get("format_version").is_none()
-        && doc.get("version").is_some()
-        && doc.get("resources").is_some()
-    {
-        return Err(UnciaError::RawStateFile);
-    }
-
-    // Guard 4: recognizable and supported format_version.
+    // Guard 3: recognizable and supported format_version.
     let format_version = doc
         .get("format_version")
         .and_then(Value::as_str)
@@ -55,9 +46,11 @@ pub fn parse(json: &str) -> crate::Result<Vec<Resource>> {
         });
     }
 
-    // Guard 5: plan output, not state. A plan passes guards 1-4 (it has a 1.x
-    // format_version and no `values` key) and would otherwise fall through to
-    // the empty-state case below — reporting zero drift on the wrong document.
+    // Guard 4: plan output, not state. A plan passes the guards above (it has a
+    // 1.x format_version and no `values` key) and would otherwise fall through
+    // to the empty-state case below — reporting zero drift on the wrong
+    // document. `state::parse` rejects plans before routing here; this stays so
+    // the guarantee holds for direct callers of this parser too.
     for marker in PLAN_MARKERS {
         if doc.get(*marker).is_some() {
             return Err(UnciaError::WrongDocumentKind {
@@ -66,7 +59,7 @@ pub fn parse(json: &str) -> crate::Result<Vec<Resource>> {
         }
     }
 
-    // Guard 6: only now is a missing `values` a legitimate empty state.
+    // Guard 5: only now is a missing `values` a legitimate empty state.
     let show: ShowJson = serde_json::from_value(doc)?;
     let Some(values) = show.values else {
         return Ok(Vec::new());

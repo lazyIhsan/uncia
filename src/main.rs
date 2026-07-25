@@ -60,7 +60,7 @@ async fn check(state_path: String) -> Result<DriftReport> {
     } else {
         std::fs::read_to_string(&config.state_path)?
     };
-    let declared = uncia::state::terraform::parse(&state_json)?;
+    let declared = uncia::state::parse(&state_json)?;
 
     let collector = AwsCollector::new().await;
     let live = collector.fetch().await?;
