@@ -1,0 +1,77 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.9.8",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_security_group.web",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "web",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "sg-00000000000000001",
+            "name": "web",
+            "description": "web tier",
+            "vpc_id": "vpc-00000000000000001",
+            "ingress": [
+              {
+                "from_port": 443,
+                "to_port": 443,
+                "protocol": "tcp",
+                "cidr_blocks": ["0.0.0.0/0"],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": false,
+                "description": ""
+              }
+            ],
+            "egress": [
+              {
+                "from_port": 0,
+                "to_port": 0,
+                "protocol": "-1",
+                "cidr_blocks": ["0.0.0.0/0"],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": false,
+                "description": ""
+              }
+            ],
+            "tags": { "Name": "web" }
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_instance.web",
+          "mode": "managed",
+          "type": "aws_instance",
+          "name": "web",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "i-00000000000000001",
+            "instance_type": "t3.medium",
+            "ami": "ami-00000000000000001",
+            "tags": { "Name": "web" },
+            "vpc_security_group_ids": ["sg-00000000000000001"],
+            "iam_instance_profile": "app-role",
+            "metadata_options": [
+              {
+                "http_endpoint": "enabled",
+                "http_tokens": "required",
+                "http_put_response_hop_limit": 2,
+                "instance_metadata_tags": "disabled"
+              }
+            ]
+          },
+          "sensitive_values": {}
+        }
+      ]
+    }
+  }
+}

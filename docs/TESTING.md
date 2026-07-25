@@ -1,0 +1,102 @@
+# Testing
+
+uncia's hard problem is that half of it talks to AWS. This describes how that
+half gets tested without a round trip to a real account for every change.
+
+## Layers
+
+| Layer | Needs | Proves |
+|---|---|---|
+| Unit | nothing | normalization logic, diff rules |
+| **Replay** | nothing | the collectors against **real recorded AWS bytes**, end to end |
+| LocalStack | container runtime | the full loop incl. Terraform, no AWS account |
+| Live | AWS credentials | ground truth |
+
+Everything except the last two runs in CI on every push (`cargo test
+--all-targets`).
+
+## Replay harness
+
+The collectors' unit tests build `SecurityGroup` / `Instance` values with SDK
+builders, which skips XML deserialization entirely — if AWS's wire format
+differed from what a collector assumes, no unit test would notice. The replay
+tests (`tests/collector_replay.rs`) close that gap: recorded HTTP responses are
+fed back through the *real* SDK, so the bytes travel the same deserialization
+path a live call uses, then on through the collector and the diff.
+
+`tests/collector_replay.rs` covers the scenarios the live smoke test used to:
+a clean account reporting no drift, console edits showing up as drift
+(including an IMDSv2 downgrade), and a vanished instance reading as `Missing`.
+
+### Recording status
+
+| Recording | Source |
+|---|---|
+| `tests/recordings/aws-two-resources.json` | **seed — hand-written, not yet captured from a real account** |
+
+The seed exercises deserialization and locks in a regression baseline, but it
+cannot prove AWS emits exactly those bytes: it was written from the documented
+wire format, so replaying it partly tests our own assumptions against
+themselves. Replacing it with a real capture is what turns it into ground
+truth. (This is the same discipline as `tests/state_equivalence.rs`, whose
+fixtures come from a real `terraform apply` rather than from what we believed
+Terraform emits.)
+
+### Capturing from a real account
+
+Read-only; makes exactly the `Describe*` calls the collectors already make.
+
+```sh
+AWS_REGION=us-east-1 cargo run --example capture_recording -- \
+    tests/recordings/aws-two-resources.json
+```
+
+Then update `tests/fixtures/replay_state_clean.json` so the declared side
+matches the captured resources, and re-run `cargo test`.
+
+It's an example rather than a subcommand, so it never reaches the shipped
+binary.
+
+**Scrubbing.** Recordings are committed, so identifiers are replaced before
+anything is written: account IDs, resource IDs, IPs, principal IDs, request
+IDs. Substitution is *consistent* — a security group referenced from an
+instance scrubs to the same placeholder in both responses, so relationships
+survive. Values with rule semantics (`0.0.0.0`) are deliberately left intact;
+scrubbing those would quietly turn "open to the world" into "open to one host"
+and change what the recording asserts. The scrubber is unit-tested
+(`cargo test --all-targets`) because a bug in it leaks real account data into
+a public repository.
+
+Tag *values* are **not** scrubbed — the tests assert on them. Read the diff
+before committing.
+
+## LocalStack
+
+Useful because uncia needs both halves: point Terraform at LocalStack, apply,
+and you have a real state file and a live cloud to diff against, with no AWS
+account at all. Mutate something with `awslocal` and drift appears.
+
+```sh
+make localstack-up      # podman quadlet if available, else docker compose
+make localstack-status
+make localstack-down
+```
+
+Two runtimes ship because they win in different places:
+
+- **Podman quadlet** (`infra/uncia-localstack.container`) for local work —
+  rootless, no root-owned daemon, no `docker` group. `Notify=healthy` makes
+  systemd report the unit started only once LocalStack is actually healthy, so
+  tests can't race startup. Matches uncia's own argument that a drift detector
+  shouldn't require privileged agents.
+- **Docker Compose** (`infra/docker-compose.yml`) for CI, where
+  `systemctl --user` has no dbus session.
+
+Tests must only depend on something answering at `UNCIA_TEST_ENDPOINT`
+(default `http://localhost:4566`), never on a specific runtime.
+
+**Caveat:** LocalStack *approximates* AWS. It validates uncia's logic loop, not
+the normalization assumptions — those are what the replay recordings cover.
+And if the event-driven work lands, LocalStack's Lambda support wants a
+container socket mounted, which is where rootless podman gets genuinely awkward;
+expect to reach for Docker in that specific suite.

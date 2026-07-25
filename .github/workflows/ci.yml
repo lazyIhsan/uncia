@@ -26,3 +26,9 @@ jobs:
         - name: Check
           run: cargo check --all-targets
 
+        # --all-targets so example tests run too: the capture tool's scrubber
+        # is what keeps real account identifiers out of committed recordings,
+        # and it is only covered there.
+        - name: Test
+          run: cargo test --all-targets
+
