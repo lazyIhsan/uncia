@@ -1,0 +1,25 @@
+# Docker Compose equivalent of infra/uncia-localstack.container, for
+# environments without a systemd user session — CI runners in particular,
+# where `systemctl --user` has no dbus session to attach to.
+#
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# Deliberately interchangeable with the quadlet: the tests only require that
+# something answers on UNCIA_TEST_ENDPOINT, so the container runtime stays an
+# implementation detail.
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: uncia-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: ec2
+      DEBUG: "0"
+      EAGER_SERVICE_LOADING: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health || exit 1"]
+      interval: 5s
+      retries: 20
+      start_period: 10s

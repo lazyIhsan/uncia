@@ -27,3 +27,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Likely additions as implementation lands:
 #   rusqlite            — drift history persistence (store::sqlite)
 #   ratatui / crossterm — terminal UI (tui)
+
+# Replay-harness support: recorded AWS responses are fed back through the real
+# SDK so collector tests exercise wire-format deserialization offline. See
+# docs/TESTING.md.
+[dev-dependencies]
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+aws-smithy-types = "1"
+http = "1"
+regex = "1"

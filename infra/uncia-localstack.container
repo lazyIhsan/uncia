@@ -1,0 +1,40 @@
+# Podman Quadlet unit for the LocalStack integration target.
+#
+# Install:
+#   mkdir -p ~/.config/containers/systemd
+#   cp infra/uncia-localstack.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user start uncia-localstack
+#
+# Rootless by design: no root-owned daemon and no `docker` group (which is
+# effectively root). That matches uncia's own posture — the project argues a
+# drift detector shouldn't require privileged agents, so its test rig
+# shouldn't either.
+#
+# `Notify=healthy` is the reason to prefer this over a bare `run`: systemd
+# reports the unit started only once LocalStack answers its health check, so
+# tests can't race startup and no sleep loop is needed. Requires Podman 5.x;
+# drop the line on older versions and poll the health endpoint instead.
+
+[Unit]
+Description=LocalStack (EC2) for uncia integration tests
+
+[Container]
+Image=docker.io/localstack/localstack:latest
+ContainerName=uncia-localstack
+PublishPort=4566:4566
+Environment=SERVICES=ec2
+Environment=DEBUG=0
+Environment=EAGER_SERVICE_LOADING=1
+HealthCmd=curl -fsS http://localhost:4566/_localstack/health || exit 1
+HealthInterval=5s
+HealthRetries=20
+HealthStartPeriod=10s
+Notify=healthy
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
