@@ -2197,6 +2197,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-ec2",
  "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
  "aws-smithy-types",
  "clap",
  "http 1.4.2",

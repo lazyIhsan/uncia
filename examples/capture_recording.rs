@@ -23,9 +23,13 @@
 //! holds something sensitive.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use aws_sdk_ec2::config::BehaviorVersion;
-use aws_smithy_http_client::test_util::dvr::RecordingClient;
+use aws_smithy_runtime_api::client::interceptors::Intercept;
+use aws_smithy_runtime_api::client::interceptors::context::AfterDeserializationInterceptorContextRef;
+use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+use aws_smithy_types::config_bag::ConfigBag;
 use regex::Regex;
 use serde_json::json;
 
@@ -50,9 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("DescribeSecurityGroups", Op::SecurityGroups),
         ("DescribeInstances", Op::Instances),
     ] {
-        let recorder = RecordingClient::https();
+        let recorder = ResponseRecorder::default();
         let config = aws_sdk_ec2::config::Builder::from(&base)
-            .http_client(recorder.clone())
+            .interceptor(recorder.clone())
             .build();
         let client = aws_sdk_ec2::Client::from_conf(config);
 
@@ -62,9 +66,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .len(),
             Op::Instances => uncia::collector::aws::ec2::fetch(&client).await?.len(),
         };
-        eprintln!("{operation}: {count} resource(s)");
+        let captured = recorder.take();
+        eprintln!(
+            "{operation}: {count} resource(s), {} response(s) captured",
+            captured.len()
+        );
 
-        for (status, body) in extract_responses(&recorder)? {
+        // A call that succeeded but recorded nothing means the capture hook is
+        // broken, not that the account is empty — an API call always produces
+        // a response. Fail loudly rather than writing a recording that would
+        // replay as "no live resources" and quietly turn every declared
+        // resource into false Missing drift. (Same rule the state parsers
+        // hold: never let a silent empty stand in for a real read.)
+        if captured.is_empty() {
+            return Err(format!(
+                "{operation} returned {count} resource(s) but no response was captured — \
+                 the recording hook is not seeing response bodies; refusing to write an \
+                 empty recording"
+            )
+            .into());
+        }
+
+        for (status, body) in captured {
             responses.push(json!({
                 "operation": operation,
                 "status": status,
@@ -95,44 +118,60 @@ enum Op {
     Instances,
 }
 
-/// Pull `(status, body)` pairs out of a recorder's captured traffic.
+/// Snapshots each response body as it arrives, without touching the request.
 ///
-/// `dvr::Event` keeps its fields private, so the traffic is walked through its
-/// serde representation rather than destructured. Events arrive in order: a
-/// `Response` action opens an entry, subsequent response-direction `Data`
-/// segments append to its body.
-fn extract_responses(
-    recorder: &RecordingClient,
-) -> Result<Vec<(u16, String)>, Box<dyn std::error::Error>> {
-    let traffic = serde_json::to_value(recorder.network_traffic())?;
-    let events = traffic["events"].as_array().cloned().unwrap_or_default();
+/// Deliberately an *interceptor* rather than a replacement HTTP client: the
+/// SDK's own stack keeps building, signing and sending the request exactly as
+/// it does for `uncia check`. Swapping in a recording HTTP client instead put a
+/// wrapper in the request path and EC2 — whose query protocol POSTs a signed
+/// form-encoded body — answered `400` with an empty body, which then surfaced
+/// confusingly as "error parsing XML: no root element". Observing rather than
+/// intermediating avoids that whole class of problem.
+#[derive(Debug, Clone, Default)]
+struct ResponseRecorder {
+    captured: Arc<Mutex<Vec<(u16, String)>>>,
+}
 
-    let mut out: Vec<(u16, String)> = Vec::new();
-    for event in events {
-        let action = &event["action"];
-
-        if let Some(response) = action.get("Response") {
-            // `response` is a Result, serialized as {"Ok": {...}} / {"Err": ...}
-            if let Some(status) = response["response"]["Ok"]["status"].as_u64() {
-                out.push((status as u16, String::new()));
-            }
-        } else if let Some(data) = action.get("Data") {
-            if data["direction"] != json!("Response") {
-                continue;
-            }
-            // Binary bodies (Base64) are skipped: EC2 replies are XML text, and
-            // a base64 blob could not be scrubbed or reviewed anyway.
-            if let Some(chunk) = data["data"]["Utf8"].as_str()
-                && let Some(last) = out.last_mut()
-            {
-                last.1.push_str(chunk);
-            }
-        }
+impl ResponseRecorder {
+    /// Drain what has been captured so far.
+    fn take(&self) -> Vec<(u16, String)> {
+        std::mem::take(&mut *self.captured.lock().unwrap())
     }
-    Ok(out
-        .into_iter()
-        .filter(|(_, body)| !body.is_empty())
-        .collect())
+}
+
+impl Intercept for ResponseRecorder {
+    fn name(&self) -> &'static str {
+        "uncia::capture_recording::ResponseRecorder"
+    }
+
+    /// Deliberately the *after*-deserialization hook, not the before one.
+    ///
+    /// The orchestrator only buffers the response body during the
+    /// deserialization phase (`read_body` swaps the stream for an in-memory
+    /// `SdkBody` and leaves it on the response). At
+    /// `read_before_deserialization` the body is still a stream, so
+    /// `bytes()` returns `None` and a recorder there silently captures
+    /// nothing — the calls succeed, and the recording comes out empty.
+    fn read_after_deserialization(
+        &self,
+        context: &AfterDeserializationInterceptorContextRef<'_>,
+        _runtime_components: &RuntimeComponents,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), aws_smithy_runtime_api::box_error::BoxError> {
+        let response = context.response();
+        // EC2 replies are XML text; anything not valid UTF-8 is skipped rather
+        // than mangled, since it could not be scrubbed or reviewed anyway.
+        if let Some(bytes) = response.body().bytes()
+            && let Ok(body) = std::str::from_utf8(bytes)
+            && !body.is_empty()
+        {
+            self.captured
+                .lock()
+                .unwrap()
+                .push((response.status().as_u16(), body.to_string()));
+        }
+        Ok(())
+    }
 }
 
 /// Replaces identifiers with stable placeholders, consistently across every
