@@ -100,8 +100,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "scenario": "captured",
         "note": format!(
             "Captured from a real AWS account in {region} and scrubbed. \
-             Identifiers are stable placeholders; substitution is consistent \
-             across responses so cross-references still resolve."
+             Every identifier is an obviously-synthetic placeholder — account \
+             ids are 000000000000, resource ids are <prefix>-000...N, request \
+             ids are 00000000-0000-0000-0000-0000000000NN, addresses are in \
+             203.0.113.0/24 (TEST-NET-3) — so a reviewer can confirm at a \
+             glance that nothing real survived. Substitution is consistent \
+             across responses, so cross-references still resolve. Tag keys and \
+             values are NOT scrubbed: the diff asserts on them."
         ),
         "region": region,
         "responses": responses,
@@ -259,7 +264,13 @@ const KEEP_VERBATIM: &[&str] = &["0.0.0.0", "255.255.255.255", "127.0.0.1"];
 
 fn placeholder_for(kind: &str, n: usize) -> String {
     match kind {
-        "account" => "123456789012".to_string(),
+        // Deliberately all-zeros rather than AWS's conventional `123456789012`
+        // example id. A reviewer has to be able to tell, at a glance, that a
+        // committed recording carries no real account number — and a plausible
+        // looking 12-digit id is indistinguishable from an unscrubbed one.
+        // Every placeholder here is chosen to be obviously synthetic for the
+        // same reason.
+        "account" => "000000000000".to_string(),
         "uuid" => format!("00000000-0000-0000-0000-{n:012}"),
         "principal" => format!("AIPA{n:017}"),
         "ip" => format!("203.0.113.{}", n % 254 + 1),
@@ -314,6 +325,18 @@ mod tests {
         assert!(!out.contains("987654321098"), "account id survived: {out}");
         // The profile *name* is meaningful to the diff and must survive.
         assert!(out.ends_with("instance-profile/app-role"), "got: {out}");
+    }
+
+    #[test]
+    fn account_placeholder_is_obviously_synthetic() {
+        // Reviewability is the point: someone reading a committed recording
+        // must be able to tell a placeholder from a real account id without
+        // trusting that the scrubber ran. A plausible-looking id (AWS's
+        // conventional 123456789012, say) fails that test even though it is
+        // technically scrubbed.
+        let mut scrubber = Scrubber::new();
+        let out = scrubber.scrub("<ownerId>987654321098</ownerId>");
+        assert!(out.contains("000000000000"), "got: {out}");
     }
 
     #[test]
