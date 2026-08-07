@@ -65,6 +65,9 @@ requires reasoning about a resource's *effective* meaning in context, not just
 its stored attributes. **Semantic drift is the differentiator.** Behavioral
 drift earns the right to be in the room; semantic drift is why anyone stays.
 
+The mechanism is specified in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md)
+(proposed, not yet implemented).
+
 ## The public / private boundary
 
 uncia is developed as open core across two repositories.
@@ -180,10 +183,14 @@ Deliberately undecided. Recorded here so "unresolved" is distinguishable from
   feed, an explicit allow-list of expected drift, or the IaC-intent model
   itself?
 
-- **How is semantic drift's dependency graph built?** Resolving "sg-abc's
-  membership changed" means knowing which resources a rule effectively depends
-  on. Is that graph derived from Terraform references, from live cloud
-  relationships, or both — and where does it live, `uncia` or `unciaroot`?
+- ~~**How is semantic drift's dependency graph built?**~~ Answered by
+  [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md): **both** graphs are built — the
+  divergence between the declared and live graphs *is* the signal — from
+  attribute values rather than Terraform references, since the live side has no
+  references to compare against. The proposed home is the open repo (the engine
+  makes security claims about customer infrastructure and must be auditable),
+  with the extended relation catalog in `unciaroot`; that refinement to the
+  [public/private boundary](#the-public--private-boundary) is pending sign-off.
 
 - **What is the collector interface's exact contract** once there is more than
   one AWS service and, eventually, more than one cloud? The `Collector` trait
