@@ -52,7 +52,8 @@ uncia distinguishes two kinds of drift:
   drifted, a managed IAM policy's contents changed upstream). This is the
   differentiator uncia is built toward — see
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-two-drift-classes) for
-  why it's the harder and more interesting half of the problem.
+  why it's the harder and more interesting half of the problem, and
+  [`docs/SEMANTIC-DRIFT.md`](docs/SEMANTIC-DRIFT.md) for the proposed design.
 
 ## Status
 
