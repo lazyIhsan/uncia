@@ -65,7 +65,7 @@ async fn check(state_path: String) -> Result<DriftReport> {
     let collector = AwsCollector::new().await;
     let live = collector.fetch().await?;
 
-    Ok(uncia::diff::behavioral::compare(&declared, &live))
+    Ok(uncia::diff::compare(&declared, &live))
 }
 
 fn print_report(report: &DriftReport) {
@@ -73,6 +73,16 @@ fn print_report(report: &DriftReport) {
         eprintln!(
             "warning: cannot check {}: {}",
             unjoinable.resource.0, unjoinable.reason
+        );
+    }
+    for unresolved in &report.unresolved {
+        let subject = match &unresolved.resource {
+            Some(id) => id.0.as_str(),
+            None => "(all subjects)",
+        };
+        eprintln!(
+            "warning: cannot resolve `{}` for {}: {}",
+            unresolved.relation, subject, unresolved.reason
         );
     }
     for drift in &report.drifts {
@@ -89,6 +99,25 @@ fn print_report(report: &DriftReport) {
                 "[{:?}] {}: `{}` drifted\n    declared: {}\n    actual:   {}",
                 drift.severity, drift.resource.0, field, declared, actual
             ),
+            // The `via` path is printed because it is what makes the claim
+            // checkable against the account without reading uncia's source.
+            DriftKind::SemanticChanged {
+                field,
+                relation,
+                declared_effective,
+                actual_effective,
+                via,
+            } => println!(
+                "[{:?}] {}: `{}` unchanged but its meaning drifted ({})\n    \
+                 via:      {}\n    declared: {}\n    actual:   {}",
+                drift.severity,
+                drift.resource.0,
+                field,
+                relation,
+                via.join(", "),
+                declared_effective,
+                actual_effective
+            ),
             _ => println!(
                 "[{:?}] {}: drift detected",
                 drift.severity, drift.resource.0
@@ -96,15 +125,15 @@ fn print_report(report: &DriftReport) {
         }
     }
     if report.drifts.is_empty() {
+        // "No drift" must never absorb "couldn't check": both buckets are
+        // counted so silence is only ever reported when it was earned.
+        let unchecked = report.unjoinable.len() + report.unresolved.len();
         println!(
             "no drift detected{}",
-            if report.unjoinable.is_empty() {
+            if unchecked == 0 {
                 String::new()
             } else {
-                format!(
-                    " ({} resource(s) could not be checked)",
-                    report.unjoinable.len()
-                )
+                format!(" ({unchecked} check(s) could not be completed)")
             }
         );
     } else {
