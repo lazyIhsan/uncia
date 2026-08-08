@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde_json::Value;
 
 use crate::collector::LiveResource;
+use crate::diff::rules::explode_rules;
 use crate::types::drift::{Drift, DriftKind, DriftReport, Severity, Unjoinable};
 use crate::types::resource::{Resource, ResourceKind};
 
@@ -165,43 +166,4 @@ fn metadata_subset(value: &Value) -> BTreeMap<String, Value> {
         }
     }
     out
-}
-
-/// Explode a rule list into a canonical set of atoms, one per
-/// (port-range, protocol, source). Insensitive to rule order *and* to how
-/// sources are grouped into rules — AWS and Terraform group differently, and
-/// neither grouping is meaningful.
-///
-/// Rule descriptions are deliberately not part of the atom (see module docs
-/// in `collector::aws::security_group`).
-fn explode_rules(rules: &Value) -> BTreeSet<String> {
-    let mut atoms = BTreeSet::new();
-    let Some(list) = rules.as_array() else {
-        return atoms;
-    };
-    for rule in list {
-        let from = rule.get("from_port").and_then(Value::as_i64).unwrap_or(0);
-        let to = rule.get("to_port").and_then(Value::as_i64).unwrap_or(0);
-        let protocol = rule.get("protocol").and_then(Value::as_str).unwrap_or("-1");
-        let base = format!("{protocol}/{from}-{to}");
-
-        for (key, tag) in [
-            ("cidr_blocks", "cidr"),
-            ("ipv6_cidr_blocks", "cidr6"),
-            ("prefix_list_ids", "pl"),
-            ("security_groups", "sg"),
-        ] {
-            if let Some(sources) = rule.get(key).and_then(Value::as_array) {
-                for source in sources {
-                    if let Some(source) = source.as_str() {
-                        atoms.insert(format!("{base}/{tag}:{source}"));
-                    }
-                }
-            }
-        }
-        if rule.get("self").and_then(Value::as_bool).unwrap_or(false) {
-            atoms.insert(format!("{base}/self"));
-        }
-    }
-    atoms
 }

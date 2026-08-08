@@ -1,8 +1,10 @@
 # Design: semantic drift
 
-**Status: proposed.** Nothing described here is implemented. This document
-specifies the mechanism, fixes the decisions that are cheap now and expensive
-later, and names what it deliberately leaves unsettled.
+**Status: phase 1 shipped.** The engine, the `sg_membership` relation, and the
+three guards are implemented in `src/diff/semantic/`; the end-to-end replay test
+is still blocked on a capture (see [Phasing](#phasing)). This document specifies
+the mechanism, fixes the decisions that are cheap now and expensive later, and
+names what it deliberately leaves unsettled.
 
 Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — this document assumes the
 [two drift classes](ARCHITECTURE.md#the-two-drift-classes) and the
@@ -186,13 +188,21 @@ trait Relation {
     /// The subject kind and field whose meaning this relation expands.
     fn subject(&self) -> (ResourceKind, &str);
     /// Expand the subject's stored value into its effective meaning.
-    fn expand(&self, subject: &Node, graph: &Graph) -> Value;
+    fn expand(&self, subject: &Node, graph: &Graph) -> Result<Value, String>;
 }
 ```
 
-`expand` is deliberately total and side-effect-free: it reads an already-built
-graph and returns a value. It performs no I/O, so relations are unit-testable
-against hand-built graphs with no AWS involved.
+`expand` is side-effect-free: it reads an already-built graph and returns a
+value. It performs no I/O, so relations are unit-testable against hand-built
+graphs with no AWS involved.
+
+It returns `Result` rather than a bare `Value` because a subject can be
+genuinely unresolvable, which implementation surfaced: a rule may reference a
+group that is absent from the graph, meaning the group was deleted out from
+under it. Expanding anyway would report the now-empty membership as a confident
+narrowing finding, pinning the blame on the wrong resource — the real story is
+that the group is gone, which the behavioral pass reports on the group itself.
+`Err` carries the reason and routes to `Unresolved` instead.
 
 ### The pilot relation: `sg_membership`
 
@@ -242,7 +252,8 @@ Alongside it, the "couldn't check" channel gains a sibling to `Unjoinable`:
 
 ```rust
 pub struct Unresolved {
-    pub resource: ResourceId,
+    /// `None` when the whole relation is unresolvable, not one subject.
+    pub resource: Option<ResourceId>,
     pub relation: String,
     pub reason: String,
 }
@@ -251,6 +262,13 @@ pub struct Unresolved {
 Same principle as `Unjoinable`, applied one level up: when a relation cannot be
 resolved, that is neither drift nor health, and folding it into either would
 make "no semantic drift" mean two different things.
+
+`resource` is optional because the two unresolvable cases are genuinely
+different in scope. A failed authority check is a property of the *state file* —
+a file declaring no instances is not authoritative about group membership, full
+stop — so it reports once with `None`; reporting per-resource would print one
+line per declared group where one line is the truth. A subject-specific failure
+(the deleted-group case above) still carries `Some(id)`.
 
 ## Guards against false positives
 
@@ -369,10 +387,11 @@ above it carry the confidence.
 
 ## Phasing
 
-1. Graph + `Relation` + `sg_membership` + `SemanticChanged` + `Unresolved`,
-   with layers 1–3 of the testing plan. Behind no flag: it is additive, and
-   the guards are the thing keeping it quiet.
-2. Capture the recording, land the end-to-end test.
+1. ~~Graph + `Relation` + `sg_membership` + `SemanticChanged` + `Unresolved`,
+   with layers 1–3 of the testing plan.~~ **Shipped.** Behind no flag: it is
+   additive, and the guards are the thing keeping it quiet.
+2. Capture the recording, land the end-to-end test. **Next, and the only thing
+   standing between this feature and being proven against real AWS bytes.**
 3. Second relation — `instance_exposure` (an instance's effective exposure is
    the union of its attached groups' rules), which reuses the machinery and
    validates that the trait is actually a seam and not a one-off.
