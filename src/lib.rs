@@ -18,5 +18,5 @@ pub mod types;
 pub use collector::{Collector, LiveResource};
 pub use config::Config;
 pub use error::{Result, UnciaError};
-pub use types::drift::{Drift, DriftKind, DriftReport, Severity};
+pub use types::drift::{Drift, DriftKind, DriftReport, Severity, Unjoinable, Unresolved};
 pub use types::resource::{Resource, ResourceId, ResourceKind};
