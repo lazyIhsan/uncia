@@ -76,14 +76,22 @@ uncia is developed as open core across two repositories.
   types, the diff engine, the collectors (the `Collector` trait and its
   implementations), the CLI, and the TUI. Everything needed to detect and
   inspect drift against your own cloud accounts lives here and is auditable.
-- **`unciaroot`** (private) — the differentiated intelligence layer: semantic
-  correlation (resolving effective meaning across related resources), audit
-  trails, and compliance packaging (mapping drift to controls, generating the
-  evidence a regulated org needs to prove live systems match audited specs).
+- **`unciaroot`** (private) — the differentiated intelligence layer: the
+  extended semantic relation catalog, cross-account and cross-run correlation,
+  audit trails, and compliance packaging (mapping drift to controls, generating
+  the evidence a regulated org needs to prove live systems match audited specs).
 
 The guiding rule: anything that runs against a customer's infrastructure and
 needs their trust belongs in the open repo; the correlation and compliance
 intelligence that runs on our side is what `unciaroot` protects.
+
+Semantic correlation straddles that line, so it is split rather than assigned:
+the **engine** is open (a wrong engine fails silently, and only its source
+reveals drift it never reported), while **additional relations** may be private,
+because a relation's claim arrives with the `via` path that makes it checkable
+without reading its source. See
+[`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md#where-the-line-actually-falls) for the
+test and the two constraints it puts on the private side.
 
 ## Non-goals
 
@@ -187,10 +195,9 @@ Deliberately undecided. Recorded here so "unresolved" is distinguishable from
   [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md): **both** graphs are built — the
   divergence between the declared and live graphs *is* the signal — from
   attribute values rather than Terraform references, since the live side has no
-  references to compare against. The proposed home is the open repo (the engine
-  makes security claims about customer infrastructure and must be auditable),
-  with the extended relation catalog in `unciaroot`; that refinement to the
-  [public/private boundary](#the-public--private-boundary) is pending sign-off.
+  references to compare against. Its home is the open repo, with the extended
+  relation catalog in `unciaroot` — settled, and reflected in the
+  [public/private boundary](#the-public--private-boundary) above.
 
 - **What is the collector interface's exact contract** once there is more than
   one AWS service and, eventually, more than one cloud? The `Collector` trait

@@ -291,24 +291,54 @@ policy remains open.
 ## Interaction with the public/private boundary
 
 `ARCHITECTURE.md` places "semantic correlation (resolving effective meaning
-across related resources)" in the private `unciaroot`. Taken literally, this
-document specifies something that repo would own — so the boundary needs a
-decision before code lands, not after.
+across related resources)" in the private `unciaroot`. Taken literally, that
+would put this entire document in the other repo, so the split was decided
+before code lands rather than after.
 
-**Proposed refinement, requiring sign-off:** split by the rule already stated
-there — *anything that runs against a customer's infrastructure and needs their
-trust belongs in the open repo.*
+**Decided:** the base engine is open; the extended relation catalog is private.
 
-- **`uncia` (open):** the engine — graph construction, `Relation`, expansion,
-  comparison, `SemanticChanged` — plus a small catalog of built-in relations.
-  This runs against customer infrastructure and makes security claims about it.
-  A closed component asserting "your web tier is reachable from an unmanaged
-  host" is unauditable, and unauditable security claims do not get trusted.
-- **`unciaroot` (private):** the extended relation catalog, cross-account and
-  cross-run correlation, and compliance mapping.
+- **`uncia` (open):** graph construction, the `Relation` trait, expansion,
+  comparison, the three guards, `SemanticChanged` and `Unresolved` — plus the
+  built-in relations needed for the tool to be genuinely useful standalone.
+- **`unciaroot` (private):** additional relations registered through the same
+  trait, cross-account and cross-run correlation, and compliance mapping.
 
-The `Relation` trait is what makes this split cheap: it is the seam an extended
+The `Relation` trait is what makes the split cheap: it is the seam an extended
 catalog plugs into, exactly as `Collector` is for cloud coverage.
+
+### Where the line actually falls
+
+"Base engine open, intricate parts private" is the right instinct but not yet a
+usable rule — *intricate* is a judgement call, so it gets relitigated at every
+PR that adds a relation. The operational test:
+
+> **A finding must be verifiable from its `via` path alone, without reading the
+> code that produced it.**
+
+This is why the engine can never be private and why a private relation catalog
+is nonetheless legitimate:
+
+- **A wrong engine fails silently.** If graph construction or the guards are
+  wrong, uncia misses real drift or fabricates it, and *no amount of inspecting
+  the output reveals that* — the finding that never appeared leaves no trace.
+  Only the source shows it. So the engine must be auditable.
+- **A wrong relation fails loudly.** A relation's claim arrives with the path
+  that justifies it. "`i-console` is in `sg-app`, which `web` trusts on 443" is
+  checkable against the account in a minute by someone who has never seen the
+  relation's source. The mandatory `via` field is what makes this true, which
+  makes it structural rather than cosmetic: **`via` is the mechanism that
+  licenses a closed relation catalog at all.**
+
+Two constraints follow, and they bind the private side:
+
+1. **A relation that cannot state its `via` path in terms the user can check
+   independently must be open**, no matter how valuable. Failing that bar means
+   the finding is unfalsifiable, which the falsifiability requirement already
+   forbids — the boundary does not get to create an exception to it.
+2. **The open relation set must stand on its own**, not function as a teaser.
+   An open engine wired to one relation that nags toward an upgrade would spend
+   exactly the trust the open repo exists to earn. `sg_membership` and
+   `instance_exposure` are both in the open set for this reason.
 
 ## Testing
 
