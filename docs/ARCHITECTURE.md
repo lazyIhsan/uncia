@@ -65,8 +65,8 @@ requires reasoning about a resource's *effective* meaning in context, not just
 its stored attributes. **Semantic drift is the differentiator.** Behavioral
 drift earns the right to be in the room; semantic drift is why anyone stays.
 
-The mechanism is specified in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md)
-(proposed, not yet implemented).
+The mechanism is specified in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md); the
+first relation — security-group membership — ships today.
 
 ## The public / private boundary
 
@@ -131,18 +131,17 @@ here is a deliberate boundary, not a forgotten feature.
   Terraform schema; the `state` module is the seam where another schema would
   plug in.*
 
-- **Security-group rules are checked only when declared inline.** The
-  `aws_security_group` collector compares a group's live rules against the
-  `ingress`/`egress` blocks declared inline on that group. Rules declared as
-  *separate* resources — `aws_security_group_rule`, or the newer
-  `aws_vpc_security_group_ingress_rule` / `_egress_rule` — leave the group's
-  inline blocks empty in state, so uncia would compare live rules against an
-  empty declared set and report every rule as drift; those separate rule
-  resources are also uncovered (`ResourceKind::Other`) and not checked. Only
-  inline-rule security groups are supported in v1.
-  *Revisit by giving the diff a notion of rules contributed by sibling
-  resources, so a group and its separately-declared rules are reconciled as
-  one effective rule set before comparison.*
+- **Rules owned by a *different state file* than their group are not
+  reconciled.** A group's rules are read from its inline `ingress`/`egress`
+  blocks **and** from any `aws_security_group_rule` /
+  `aws_vpc_security_group_ingress_rule` / `_egress_rule` resources declared
+  alongside it, so either style is checked correctly. But if the group lives in
+  one state file and its rules in another, the group's file sees no sibling
+  rules and reports the live rules as drift. That is defensible — the file
+  declares the group and thereby claims its rule set — but it is a false
+  positive for a split-state layout.
+  *Revisit together with unmanaged detection: both need uncia to know that
+  another state file legitimately owns something it can see.*
 
 ## Invariants
 

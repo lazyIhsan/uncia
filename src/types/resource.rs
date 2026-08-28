@@ -22,6 +22,15 @@ pub struct ResourceId(pub String);
 pub enum ResourceKind {
     AwsSecurityGroup,
     AwsInstance,
+    /// A rule declared as its own resource rather than inline on the group.
+    ///
+    /// These are never compared against live observations — no collector
+    /// returns them, because AWS reports a group's rules on the group. They
+    /// are read only as *declared intent*, and reconciled into the owning
+    /// group's rule set before comparison. See `crate::diff::rules`.
+    AwsSecurityGroupRule,
+    AwsVpcSecurityGroupIngressRule,
+    AwsVpcSecurityGroupEgressRule,
     Other(String),
 }
 
@@ -31,6 +40,9 @@ impl ResourceKind {
         match terraform_type {
             "aws_security_group" => Self::AwsSecurityGroup,
             "aws_instance" => Self::AwsInstance,
+            "aws_security_group_rule" => Self::AwsSecurityGroupRule,
+            "aws_vpc_security_group_ingress_rule" => Self::AwsVpcSecurityGroupIngressRule,
+            "aws_vpc_security_group_egress_rule" => Self::AwsVpcSecurityGroupEgressRule,
             other => Self::Other(other.to_string()),
         }
     }
@@ -40,6 +52,9 @@ impl ResourceKind {
         match self {
             Self::AwsSecurityGroup => "aws_security_group",
             Self::AwsInstance => "aws_instance",
+            Self::AwsSecurityGroupRule => "aws_security_group_rule",
+            Self::AwsVpcSecurityGroupIngressRule => "aws_vpc_security_group_ingress_rule",
+            Self::AwsVpcSecurityGroupEgressRule => "aws_vpc_security_group_egress_rule",
             Self::Other(s) => s,
         }
     }
