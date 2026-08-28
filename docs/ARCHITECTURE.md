@@ -98,6 +98,31 @@ can't see membership drift at all. The overlap of "IaC-declared," "live
 verified," and "reasons about effective meaning, not just field values" is
 empty except here.
 
+**Overmind is the closest adjacent tool, and the closest miss.** It builds a
+live dependency graph across AWS/GCP/Kubernetes and reports blast radius —
+"a security-group change affects N resources downstream" is their own
+example, and it's the same shape of claim this project cares about. But it
+operates on a `terraform plan` you are *about to* apply: pre-deployment risk
+assessment of a proposed change. It can't catch the scenario `sg_membership`
+exists for — someone attaching a group to an instance in the console, with no
+plan involved at all — because there is no plan for it to analyze. uncia
+checks state that is *already* applied; Overmind checks a change that has
+*not yet* happened. Different moment in the lifecycle, not a smaller version
+of the same tool.
+
+**Overmind's risk verdicts are LLM-generated; uncia's are not, and won't be.**
+Its severity labels and explanations come from LLM-powered analysis run over
+the dependency graph. That is exactly what [the deterministic
+non-goal](#non-goals) rules out for uncia's core: a finding that can't be
+independently checked erodes the trust a merge-blocking CI gate needs. An LLM
+could still sit *above* uncia's output — narrating a report, explaining a
+`via` path in plain English, helping triage a busy day — as long as it never
+decides *whether* something is a finding or *how severe* it is. That decision
+stays a deterministic function of declared and observed state, full stop; the
+moment severity depends on a model call, the finding stops being
+independently verifiable and becomes something you either trust or re-derive
+yourself, which defeats the point of automating the check at all.
+
 **The expansion path stays inside network exposure.** `sg_membership` is one
 relation; the niche is "does this network boundary still mean what the
 Terraform says it means," and there is real depth to build there before
@@ -184,13 +209,21 @@ here is a deliberate boundary, not a forgotten feature.
   *Revisit only after detection is trusted in production; auto-remediation on
   top of an immature detector is how tools get uninstalled.*
 
-- **No statistical inference or machine-learned baselines.** Drift in uncia is
-  **deterministic and fully observed**: it is a function of declared state and
-  observed live state, both of which are read in full. There is no probabilistic
-  "this looks anomalous" verdict. A drift finding must always trace to a
-  concrete, inspectable difference.
-  *Revisit never for the core diff; any anomaly-scoring would live in
-  `unciaroot` as an advisory layer, not in the deterministic engine.*
+- **No statistical inference or machine-learned baselines — including
+  LLM-generated risk or anomaly verdicts.** Drift in uncia is **deterministic
+  and fully observed**: it is a function of declared state and observed live
+  state, both of which are read in full. There is no probabilistic "this
+  looks anomalous" verdict, whatever produces it — a trained anomaly model and
+  an LLM call are the same non-goal here. A drift finding must always trace to
+  a concrete, inspectable difference. Overmind's LLM-scored risk assessments
+  are the concrete case this rules out; see [why network-exposure drift, not
+  general drift](#why-network-exposure-drift-not-general-drift) for the full
+  contrast.
+  *Revisit never for the core diff. An LLM narrating or summarizing findings
+  the deterministic engine already produced doesn't touch this non-goal —
+  that's presentation, not decision-making — but nothing gets to decide
+  whether something is a finding, or how severe it is, except the
+  deterministic comparison.*
 
 - **Multi-IaC beyond the Terraform state schema is out of scope for v1.** uncia
   reads the Terraform JSON state schema. **OpenTofu is in scope** — `tofu show
