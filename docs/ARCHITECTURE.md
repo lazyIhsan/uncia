@@ -98,21 +98,21 @@ can't see membership drift at all. The overlap of "IaC-declared," "live
 verified," and "reasons about effective meaning, not just field values" is
 empty except here.
 
-**Overmind is the closest adjacent tool, and the closest miss.** It builds a
-live dependency graph across AWS/GCP/Kubernetes and reports blast radius —
-"a security-group change affects N resources downstream" is their own
-example, and it's the same shape of claim this project cares about. But it
-operates on a `terraform plan` you are *about to* apply: pre-deployment risk
-assessment of a proposed change. It can't catch the scenario `sg_membership`
-exists for — someone attaching a group to an instance in the console, with no
-plan involved at all — because there is no plan for it to analyze. uncia
-checks state that is *already* applied; Overmind checks a change that has
-*not yet* happened. Different moment in the lifecycle, not a smaller version
-of the same tool.
+**The closest adjacent tools are the closest miss.** A newer class of tools
+builds a live dependency graph across a cloud account and reports blast
+radius — "a security-group change affects N resources downstream" is a
+claim in that same shape this project cares about. But they operate on a
+`terraform plan` you are *about to* apply: pre-deployment risk assessment of
+a proposed change. That can't catch the scenario `sg_membership` exists for —
+someone attaching a group to an instance in the console, with no plan
+involved at all — because there is no plan to analyze. uncia checks state
+that is *already* applied; a plan-time tool checks a change that has *not
+yet* happened. Different moment in the lifecycle, not a smaller version of
+the same tool.
 
-**Overmind's risk verdicts are LLM-generated; uncia's are not, and won't be.**
-Its severity labels and explanations come from LLM-powered analysis run over
-the dependency graph. That is exactly what [the deterministic
+**Some of those tools score risk with an LLM; uncia's core will not.** Their
+severity labels and explanations come from LLM-powered analysis run over the
+dependency graph. That is exactly what [the deterministic
 non-goal](#non-goals) rules out for uncia's core: a finding that can't be
 independently checked erodes the trust a merge-blocking CI gate needs. An LLM
 could still sit *above* uncia's output — narrating a report, explaining a
@@ -215,10 +215,10 @@ here is a deliberate boundary, not a forgotten feature.
   state, both of which are read in full. There is no probabilistic "this
   looks anomalous" verdict, whatever produces it — a trained anomaly model and
   an LLM call are the same non-goal here. A drift finding must always trace to
-  a concrete, inspectable difference. Overmind's LLM-scored risk assessments
-  are the concrete case this rules out; see [why network-exposure drift, not
-  general drift](#why-network-exposure-drift-not-general-drift) for the full
-  contrast.
+  a concrete, inspectable difference. LLM-scored risk assessments from
+  adjacent blast-radius tools are the concrete case this rules out; see [why
+  network-exposure drift, not general drift](#why-network-exposure-drift-not-general-drift)
+  for the full contrast.
   *Revisit never for the core diff. An LLM narrating or summarizing findings
   the deterministic engine already produced doesn't touch this non-goal —
   that's presentation, not decision-making — but nothing gets to decide
