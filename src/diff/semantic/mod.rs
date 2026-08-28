@@ -20,9 +20,10 @@
 pub mod graph;
 pub mod relations;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::collector::LiveResource;
+use crate::diff::rules::SiblingRules;
 use crate::types::drift::{Drift, DriftKind, DriftReport, Severity, Unresolved};
 use crate::types::resource::{Resource, ResourceKind};
 use graph::{Graph, Node};
@@ -59,11 +60,18 @@ fn catalog() -> Vec<Box<dyn Relation>> {
 /// *defined* as the field being unchanged, so a field the behavioral pass
 /// already flagged must not also produce a semantic finding.
 pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftReport) {
-    let declared_graph = graph::build(
-        declared
-            .iter()
-            .filter_map(|r| Some((&r.kind, r.cloud_id()?, &r.attributes))),
-    );
+    // The declared graph must carry *effective* rules, not raw inline blocks.
+    // A group whose rules are declared as sibling resources has empty inline
+    // blocks, so a relation reading them straight off the node would compare an
+    // empty declared rule set against a real live one and invent drift — the
+    // behavioral pass's reconciliation would have merely moved the false
+    // positive rather than removed it.
+    let siblings = SiblingRules::index(declared);
+    let effective: Vec<(&ResourceKind, &str, Map<String, Value>)> = declared
+        .iter()
+        .filter_map(|r| Some((&r.kind, r.cloud_id()?, effective_attributes(r, &siblings))))
+        .collect();
+    let declared_graph = graph::build(effective.iter().map(|(k, id, a)| (*k, *id, a)));
     let live_graph = graph::build(
         live.iter()
             .map(|r| (&r.kind, r.cloud_id.as_str(), &r.attributes)),
@@ -155,6 +163,32 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
             });
         }
     }
+}
+
+/// A declared resource's attributes with its separately-declared rules folded
+/// into the rule lists, so relations see what the group effectively allows.
+fn effective_attributes(resource: &Resource, siblings: &SiblingRules) -> Map<String, Value> {
+    let mut attributes = resource.attributes.clone();
+    if resource.kind != ResourceKind::AwsSecurityGroup {
+        return attributes;
+    }
+    let Some(cloud_id) = resource.cloud_id() else {
+        return attributes;
+    };
+    for direction in ["ingress", "egress"] {
+        let extra = siblings.blocks(cloud_id, direction);
+        if extra.is_empty() {
+            continue;
+        }
+        let mut rules = attributes
+            .get(direction)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        rules.extend(extra);
+        attributes.insert(direction.to_string(), Value::Array(rules));
+    }
+    attributes
 }
 
 /// Whether the behavioral pass already reported this exact resource and field.

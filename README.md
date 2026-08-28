@@ -77,7 +77,7 @@ Pre-1.0, actively developed, no packaged releases yet.
 | | |
 |---|---|
 | Declared-state inputs | `terraform show -json`, `tofu show -json`, raw `.tfstate` (auto-detected) |
-| Live collectors | AWS only — EC2 instances, Security Groups (inline rules only) |
+| Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules) |
 | Drift detection | Behavioral (literal field diff) + semantic (security-group membership) |
 | History / TUI | In progress (`src/store`, `src/tui`), not yet wired to the CLI |
 

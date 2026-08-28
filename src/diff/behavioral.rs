@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde_json::Value;
 
 use crate::collector::LiveResource;
-use crate::diff::rules::explode_rules;
+use crate::diff::rules::{SiblingRules, explode_rules};
 use crate::types::drift::{Drift, DriftKind, DriftReport, Severity, Unjoinable};
 use crate::types::resource::{Resource, ResourceKind};
 
@@ -51,6 +51,11 @@ const METADATA_OPTION_KEYS: &[&str] = &[
 /// Compare declared resources against live observations and report drift.
 pub fn compare(declared: &[Resource], live: &[LiveResource]) -> DriftReport {
     let mut report = DriftReport::default();
+
+    // Rules declared as separate resources belong to their group's rule set.
+    // Without this the group's inline blocks are empty while the live group has
+    // real rules, and every one of them reads as drift.
+    let siblings = SiblingRules::index(declared);
 
     let live_index: HashMap<(&ResourceKind, &str), &LiveResource> = live
         .iter()
@@ -104,7 +109,11 @@ pub fn compare(declared: &[Resource], live: &[LiveResource]) -> DriftReport {
                 .unwrap_or(Value::Null);
 
             let equal = if RULE_FIELDS.contains(field) {
-                explode_rules(&declared_value) == explode_rules(&actual_value)
+                // The live side needs no such reconciliation: AWS reports a
+                // group's rules on the group, however Terraform declared them.
+                let mut declared_atoms = explode_rules(&declared_value);
+                declared_atoms.extend(siblings.atoms(cloud_id, field));
+                declared_atoms == explode_rules(&actual_value)
             } else if SET_FIELDS.contains(field) {
                 as_string_set(&declared_value) == as_string_set(&actual_value)
             } else if *field == "metadata_options" {
