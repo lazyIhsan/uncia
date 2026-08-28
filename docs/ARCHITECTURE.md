@@ -68,6 +68,90 @@ drift earns the right to be in the room; semantic drift is why anyone stays.
 The mechanism is specified in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md); the
 first relation — security-group membership — ships today.
 
+## Why network-exposure drift, not general drift
+
+uncia's differentiator (semantic drift) is deliberately scoped to network
+exposure — security groups and the resources that connect to or through
+them — rather than pursued as a general cross-resource semantic engine. This
+is a market judgment as much as a technical one, so it is recorded here
+rather than left implicit in which relations happen to exist.
+
+**Behavioral drift alone is not a defensible product.** driftctl proved the
+demand for it — real open-source adoption — and still didn't survive: its
+maintainer (Cloudskiff) was acquired by Snyk, and driftctl was sunset not
+long after, around the same time Terraform Cloud began shipping continuous
+drift detection natively. A tool whose entire value is "your state doesn't
+match reality" is competing with the platform vendor that owns the format it
+reads. Behavioral drift ships in uncia because
+[it's table stakes](#the-two-drift-classes), not because it's where the
+value lives.
+
+**Semantic drift over network exposure is a gap nothing else fills.**
+CSPM/CNAPP platforms (Wiz, Orca, Prisma Cloud) reason about effective
+exposure across a live resource graph, but aren't anchored to declared
+intent — they can't say "this trust relationship is still exactly what your
+Terraform declared, and it no longer means what it did." AWS's VPC
+Reachability Analyzer has the same gap from the other side: point-in-time
+graph analysis, no IaC anchor, no CI gate. Static analyzers (Checkov, tfsec)
+read declared config only, with no live account to compare against, so they
+can't see membership drift at all. The overlap of "IaC-declared," "live
+verified," and "reasons about effective meaning, not just field values" is
+empty except here.
+
+**The closest adjacent tools are the closest miss.** A newer class of tools
+builds a live dependency graph across a cloud account and reports blast
+radius — "a security-group change affects N resources downstream" is a
+claim in that same shape this project cares about. But they operate on a
+`terraform plan` you are *about to* apply: pre-deployment risk assessment of
+a proposed change. That can't catch the scenario `sg_membership` exists for —
+someone attaching a group to an instance in the console, with no plan
+involved at all — because there is no plan to analyze. uncia checks state
+that is *already* applied; a plan-time tool checks a change that has *not
+yet* happened. Different moment in the lifecycle, not a smaller version of
+the same tool.
+
+**Some of those tools score risk with an LLM; uncia's core will not.** Their
+severity labels and explanations come from LLM-powered analysis run over the
+dependency graph. That is exactly what [the deterministic
+non-goal](#non-goals) rules out for uncia's core: a finding that can't be
+independently checked erodes the trust a merge-blocking CI gate needs. An LLM
+could still sit *above* uncia's output — narrating a report, explaining a
+`via` path in plain English, helping triage a busy day — as long as it never
+decides *whether* something is a finding or *how severe* it is. That decision
+stays a deterministic function of declared and observed state, full stop; the
+moment severity depends on a model call, the finding stops being
+independently verifiable and becomes something you either trust or re-derive
+yourself, which defeats the point of automating the check at all.
+
+**The expansion path stays inside network exposure.** `sg_membership` is one
+relation; the niche is "does this network boundary still mean what the
+Terraform says it means," and there is real depth to build there before
+uncia needs to leave it:
+
+- `instance_exposure` — an instance's effective exposure is the union of its
+  attached groups' rules (phase 3 in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md))
+- security-group membership resolved through an ALB/NLB target group or
+  listener, not just direct EC2 attachment
+- the same membership question for Lambda ENIs, RDS, and ECS tasks — anything
+  else that can sit inside a security group
+- NACL interaction — a security-group rule can be declared correctly and
+  still not matter if a NACL blocks it
+- a route table or peering change that alters what a CIDR range in a rule
+  actually reaches
+
+Each of these has the same claim shape as `sg_membership`: a declared trust
+relationship, a live resolution, a `via` path that makes the finding
+checkable without reading uncia's source. That is depth within one niche, not
+breadth across many.
+
+**IAM effective-permissions and other non-network relations are deferred,
+not abandoned.** The IAM example above (a managed policy's contents drifting
+upstream of an unchanged ARN) is a real instance of the same underlying
+concept, but pursuing it now would mean building depth in a second domain
+before network exposure has proven out.
+*Revisit once network-exposure relations are deep enough that the niche is
+demonstrably won.*
+
 ## The public / private boundary
 
 uncia is developed as open core across two repositories.
@@ -99,6 +183,17 @@ These are out of scope **on purpose**. Each carries the condition under which
 it would be reconsidered. Absence from this list is not permission; presence
 here is a deliberate boundary, not a forgotten feature.
 
+- **Semantic relations outside network exposure — most notably IAM
+  effective-permissions and managed-policy content drift — are deferred.**
+  They're a real instance of the same concept (see
+  [the two drift classes](#the-two-drift-classes)), but pursuing them now
+  would mean building depth in a second domain before network exposure has
+  proven out. See
+  [why network-exposure drift, not general drift](#why-network-exposure-drift-not-general-drift)
+  for the reasoning.
+  *Revisit once network-exposure relations are deep enough that the niche is
+  demonstrably won.*
+
 - **eBPF / runtime (data-plane) collection is out of scope for v1.** uncia
   observes the control plane only. Watching syscalls, process execs, or live
   network flows would make uncia a runtime-security tool competing with
@@ -114,13 +209,21 @@ here is a deliberate boundary, not a forgotten feature.
   *Revisit only after detection is trusted in production; auto-remediation on
   top of an immature detector is how tools get uninstalled.*
 
-- **No statistical inference or machine-learned baselines.** Drift in uncia is
-  **deterministic and fully observed**: it is a function of declared state and
-  observed live state, both of which are read in full. There is no probabilistic
-  "this looks anomalous" verdict. A drift finding must always trace to a
-  concrete, inspectable difference.
-  *Revisit never for the core diff; any anomaly-scoring would live in
-  `unciaroot` as an advisory layer, not in the deterministic engine.*
+- **No statistical inference or machine-learned baselines — including
+  LLM-generated risk or anomaly verdicts.** Drift in uncia is **deterministic
+  and fully observed**: it is a function of declared state and observed live
+  state, both of which are read in full. There is no probabilistic "this
+  looks anomalous" verdict, whatever produces it — a trained anomaly model and
+  an LLM call are the same non-goal here. A drift finding must always trace to
+  a concrete, inspectable difference. LLM-scored risk assessments from
+  adjacent blast-radius tools are the concrete case this rules out; see [why
+  network-exposure drift, not general drift](#why-network-exposure-drift-not-general-drift)
+  for the full contrast.
+  *Revisit never for the core diff. An LLM narrating or summarizing findings
+  the deterministic engine already produced doesn't touch this non-goal —
+  that's presentation, not decision-making — but nothing gets to decide
+  whether something is a finding, or how severe it is, except the
+  deterministic comparison.*
 
 - **Multi-IaC beyond the Terraform state schema is out of scope for v1.** uncia
   reads the Terraform JSON state schema. **OpenTofu is in scope** — `tofu show
