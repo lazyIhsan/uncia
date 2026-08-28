@@ -68,6 +68,65 @@ drift earns the right to be in the room; semantic drift is why anyone stays.
 The mechanism is specified in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md); the
 first relation — security-group membership — ships today.
 
+## Why network-exposure drift, not general drift
+
+uncia's differentiator (semantic drift) is deliberately scoped to network
+exposure — security groups and the resources that connect to or through
+them — rather than pursued as a general cross-resource semantic engine. This
+is a market judgment as much as a technical one, so it is recorded here
+rather than left implicit in which relations happen to exist.
+
+**Behavioral drift alone is not a defensible product.** driftctl proved the
+demand for it — real open-source adoption — and still didn't survive: its
+maintainer (Cloudskiff) was acquired by Snyk, and driftctl was sunset not
+long after, around the same time Terraform Cloud began shipping continuous
+drift detection natively. A tool whose entire value is "your state doesn't
+match reality" is competing with the platform vendor that owns the format it
+reads. Behavioral drift ships in uncia because
+[it's table stakes](#the-two-drift-classes), not because it's where the
+value lives.
+
+**Semantic drift over network exposure is a gap nothing else fills.**
+CSPM/CNAPP platforms (Wiz, Orca, Prisma Cloud) reason about effective
+exposure across a live resource graph, but aren't anchored to declared
+intent — they can't say "this trust relationship is still exactly what your
+Terraform declared, and it no longer means what it did." AWS's VPC
+Reachability Analyzer has the same gap from the other side: point-in-time
+graph analysis, no IaC anchor, no CI gate. Static analyzers (Checkov, tfsec)
+read declared config only, with no live account to compare against, so they
+can't see membership drift at all. The overlap of "IaC-declared," "live
+verified," and "reasons about effective meaning, not just field values" is
+empty except here.
+
+**The expansion path stays inside network exposure.** `sg_membership` is one
+relation; the niche is "does this network boundary still mean what the
+Terraform says it means," and there is real depth to build there before
+uncia needs to leave it:
+
+- `instance_exposure` — an instance's effective exposure is the union of its
+  attached groups' rules (phase 3 in [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md))
+- security-group membership resolved through an ALB/NLB target group or
+  listener, not just direct EC2 attachment
+- the same membership question for Lambda ENIs, RDS, and ECS tasks — anything
+  else that can sit inside a security group
+- NACL interaction — a security-group rule can be declared correctly and
+  still not matter if a NACL blocks it
+- a route table or peering change that alters what a CIDR range in a rule
+  actually reaches
+
+Each of these has the same claim shape as `sg_membership`: a declared trust
+relationship, a live resolution, a `via` path that makes the finding
+checkable without reading uncia's source. That is depth within one niche, not
+breadth across many.
+
+**IAM effective-permissions and other non-network relations are deferred,
+not abandoned.** The IAM example above (a managed policy's contents drifting
+upstream of an unchanged ARN) is a real instance of the same underlying
+concept, but pursuing it now would mean building depth in a second domain
+before network exposure has proven out.
+*Revisit once network-exposure relations are deep enough that the niche is
+demonstrably won.*
+
 ## The public / private boundary
 
 uncia is developed as open core across two repositories.
@@ -98,6 +157,17 @@ test and the two constraints it puts on the private side.
 These are out of scope **on purpose**. Each carries the condition under which
 it would be reconsidered. Absence from this list is not permission; presence
 here is a deliberate boundary, not a forgotten feature.
+
+- **Semantic relations outside network exposure — most notably IAM
+  effective-permissions and managed-policy content drift — are deferred.**
+  They're a real instance of the same concept (see
+  [the two drift classes](#the-two-drift-classes)), but pursuing them now
+  would mean building depth in a second domain before network exposure has
+  proven out. See
+  [why network-exposure drift, not general drift](#why-network-exposure-drift-not-general-drift)
+  for the reasoning.
+  *Revisit once network-exposure relations are deep enough that the niche is
+  demonstrably won.*
 
 - **eBPF / runtime (data-plane) collection is out of scope for v1.** uncia
   observes the control plane only. Watching syscalls, process execs, or live
