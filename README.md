@@ -70,6 +70,12 @@ $ uncia check --state state.json
 Every semantic finding carries the `via` path that produced it, so the claim is
 checkable against your account without reading uncia's source.
 
+`sg_membership` isn't the first of many equally-weighted relations — semantic
+drift in uncia is deliberately scoped to **network exposure**: security groups
+and whatever else determines what can reach what. See
+[why network-exposure drift, not general drift](docs/ARCHITECTURE.md#why-network-exposure-drift-not-general-drift)
+for the reasoning and the relations planned next inside that niche.
+
 ## Status
 
 Pre-1.0, actively developed, no packaged releases yet.
