@@ -18,17 +18,12 @@
 //! Not yet detected: per-rule description drift (AWS carries descriptions
 //! per source range, Terraform per block; reconciling them is deferred).
 //!
-//! Known gap — inline rules only. `aws_security_group` can carry its rules
-//! two mutually exclusive ways: **inline** `ingress`/`egress` blocks on the
-//! group (what the diff compares against), or **separate** rule resources
-//! (`aws_security_group_rule`, or the newer
-//! `aws_vpc_security_group_ingress_rule` / `_egress_rule`). With the separate
-//! form the group's own inline `ingress`/`egress` are empty in state while the
-//! rules live as their own resources, so the diff would compare live rules
-//! against an empty declared set and report every rule as drift. Those
-//! separate rule resources are also `ResourceKind::Other` today, so they are
-//! not collected or checked. Detecting drift for separately-declared rules is
-//! deferred; see `docs/ARCHITECTURE.md` non-goals.
+//! Rules declared as *separate* resources (`aws_security_group_rule`, or the
+//! newer `aws_vpc_security_group_ingress_rule` / `_egress_rule`) need nothing
+//! special here: AWS reports a group's rules **on the group** however Terraform
+//! declared them, so this collector already returns the complete set. The
+//! reconciliation is entirely a declared-side concern, handled in
+//! `crate::diff::rules`.
 
 use aws_sdk_ec2::error::DisplayErrorContext;
 use aws_sdk_ec2::types::{IpPermission, SecurityGroup};

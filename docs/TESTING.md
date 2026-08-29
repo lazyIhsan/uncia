@@ -19,7 +19,7 @@ Everything except the last two runs in CI on every push (`cargo test
 
 | Path | What |
 |---|---|
-| `tests/collector_replay.rs` | replay tests — collectors against recorded AWS bytes |
+| `tests/collector_replay.rs` | replay tests — collectors against recorded AWS bytes; `seed_`-prefixed tests assert against hand-written data, the rest against a real capture |
 | `tests/recordings/` | the recordings themselves (see status below) |
 | `examples/capture_recording.rs` | records + scrubs a new recording from a real account |
 | `scripts/localstack.sh` | `up` / `down` / `status` for the LocalStack target |
@@ -45,17 +45,42 @@ a clean account reporting no drift, console edits showing up as drift
 
 ### Recording status
 
-| Recording | Source |
-|---|---|
-| `tests/recordings/aws-two-resources.json` | **seed — hand-written, not yet captured from a real account** |
+| Recording | Source | Grounds |
+|---|---|---|
+| `tests/recordings/aws-two-resources.json` | ✅ **captured** from a real account (us-east-1) | security groups, empty-account instances |
+| `tests/recordings/aws-instance-seed.json` | ⚠️ **seed** — hand-written | a populated `DescribeInstances` |
 
-The seed exercises deserialization and locks in a regression baseline, but it
-cannot prove AWS emits exactly those bytes: it was written from the documented
+The split exists because the captured account has **no EC2 instances**: its
+`DescribeInstances` returns an empty `reservationSet`, which is real and worth
+testing but cannot ground the instance collector. Rather than let invented
+instance bytes sit in a file labelled "captured", the guess lives in its own
+recording and the tests that use it carry a `seed_` prefix, so a reader can
+tell at a glance which assertions are ground truth.
+
+A seed exercises deserialization and locks in a regression baseline, but it
+cannot prove AWS emits exactly those bytes — it was written from the documented
 wire format, so replaying it partly tests our own assumptions against
-themselves. Replacing it with a real capture is what turns it into ground
-truth. (This is the same discipline as `tests/state_equivalence.rs`, whose
-fixtures come from a real `terraform apply` rather than from what we believed
-Terraform emits.)
+themselves. (Same discipline as `tests/state_equivalence.rs`, whose fixtures
+come from a real `terraform apply` rather than from what we believed Terraform
+emits.)
+
+**To ground the instance collector**, run the capture against an account that
+has a running instance and split the `DescribeInstances` response into
+`aws-instance-seed.json`, renaming it and flipping its row above.
+
+#### What the captured recording already proved
+
+Worth recording, because these were written blind against the API docs and had
+never been checked against AWS:
+
+- **Self-referencing rules.** A default VPC security group allows all traffic
+  from itself, which AWS models as a `UserIdGroupPair` holding the group's own
+  id. The collector's `self: true` normalization handles it correctly.
+- **Absent ports.** All-traffic rules omit `fromPort`/`toPort` entirely on the
+  wire; they normalize to `0` as Terraform represents them.
+- **Empty tag values.** `<value/>` becomes `""`, not a missing key.
+- **Unknown fields are harmless.** Real responses carry `securityGroupArn`,
+  which the seed never had and the collector ignores without complaint.
 
 ### Capturing from a real account
 

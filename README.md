@@ -45,14 +45,36 @@ uncia distinguishes two kinds of drift:
 
 - **Behavioral drift** — a field's value no longer matches what was declared
   (`instance_type` changed from `t3.medium` to `t3.large`). Straight value
-  comparison. This is what ships today.
+  comparison.
 - **Semantic drift** — the declared and live values are byte-for-byte
   identical, but the resource no longer *means* what it used to, because
-  something it depends on changed (a referenced security group's membership
-  drifted, a managed IAM policy's contents changed upstream). This is the
-  differentiator uncia is built toward — see
+  something it depends on changed. This is the differentiator — see
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#the-two-drift-classes) for
-  why it's the harder and more interesting half of the problem.
+  why it's the harder and more interesting half of the problem, and
+  [`docs/SEMANTIC-DRIFT.md`](docs/SEMANTIC-DRIFT.md) for the design.
+
+The first semantic relation ships today: **security-group membership.** A rule
+reading `allow 443 from sg-app` is byte-identical before and after someone
+attaches `sg-app` to an instance that isn't in your state file — every field on
+every declared resource still matches, so a field diff is *correct* to stay
+silent, and the set of machines that can reach your web tier grew anyway:
+
+```
+$ uncia check --state state.json
+[High] aws_security_group.web: `ingress` unchanged but its meaning drifted (sg_membership)
+    via:      sg-app
+    declared: ["tcp/443-443/member:i-worker"]
+    actual:   ["tcp/443-443/member:i-console","tcp/443-443/member:i-worker"]
+```
+
+Every semantic finding carries the `via` path that produced it, so the claim is
+checkable against your account without reading uncia's source.
+
+`sg_membership` isn't the first of many equally-weighted relations — semantic
+drift in uncia is deliberately scoped to **network exposure**: security groups
+and whatever else determines what can reach what. See
+[why network-exposure drift, not general drift](docs/ARCHITECTURE.md#why-network-exposure-drift-not-general-drift)
+for the reasoning and the relations planned next inside that niche.
 
 ## Status
 
@@ -61,8 +83,8 @@ Pre-1.0, actively developed, no packaged releases yet.
 | | |
 |---|---|
 | Declared-state inputs | `terraform show -json`, `tofu show -json`, raw `.tfstate` (auto-detected) |
-| Live collectors | AWS only — EC2 instances, Security Groups (inline rules only) |
-| Drift detection | Behavioral (literal field diff) |
+| Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules) |
+| Drift detection | Behavioral (literal field diff) + semantic (security-group membership) |
 | History / TUI | In progress (`src/store`, `src/tui`), not yet wired to the CLI |
 
 Full scope, including what's deliberately *not* supported and why, is in the
