@@ -7,14 +7,15 @@
 //! no unit test would notice. Here the bytes go through the same
 //! deserialization path a live call uses.
 //!
-//! **Two recordings, two different levels of confidence** — the distinction
-//! matters and is deliberately visible in the test names:
+//! **Two recordings, both captured from real accounts:**
 //!
-//! - `aws-two-resources.json` is **captured** from a real account. Tests over
-//!   it are ground truth.
-//! - `aws-instance-seed.json` is **hand-written**, because the captured
-//!   account has no EC2 instances. Tests over it prove the deserialization
-//!   path works but cannot prove AWS emits those bytes.
+//! - `aws-two-resources.json` — one security group, an empty account (no EC2
+//!   instances).
+//! - `aws-sg-membership.json` — three security groups including a
+//!   cross-group trust (not just the self-reference the first recording
+//!   proved), and two real running instances, both members of the trusted
+//!   group. This also grounds the `sg_membership` semantic-drift worked
+//!   example end to end — see `docs/SEMANTIC-DRIFT.md`.
 //!
 //! See `docs/TESTING.md` for the capture workflow and current status.
 
@@ -92,13 +93,27 @@ fn captured() -> Recording {
     serde_json::from_str(include_str!("recordings/aws-two-resources.json")).unwrap()
 }
 
-/// Hand-written instance response — a guess, not ground truth.
-fn instance_seed() -> Recording {
-    serde_json::from_str(include_str!("recordings/aws-instance-seed.json")).unwrap()
+/// Captured from a second real account — a security-group trust relationship
+/// plus two real running instances.
+fn sg_membership() -> Recording {
+    serde_json::from_str(include_str!("recordings/aws-sg-membership.json")).unwrap()
 }
 
 async fn collect_captured() -> Vec<LiveResource> {
     let rec = captured();
+    let mut live = security_group::fetch(&replay_client(&rec, &["DescribeSecurityGroups"]))
+        .await
+        .unwrap();
+    live.extend(
+        ec2::fetch(&replay_client(&rec, &["DescribeInstances"]))
+            .await
+            .unwrap(),
+    );
+    live
+}
+
+async fn collect_sg_membership() -> Vec<LiveResource> {
+    let rec = sg_membership();
     let mut live = security_group::fetch(&replay_client(&rec, &["DescribeSecurityGroups"]))
         .await
         .unwrap();
@@ -224,42 +239,93 @@ async fn declared_instance_absent_from_account_is_missing() {
     assert_eq!(report.drifts[0].resource.0, "aws_instance.gone");
 }
 
-// --- Seed data: hand-written, NOT ground truth ---
-//
-// These carry the `seed_` prefix so a reader can tell at a glance that they
-// assert against invented bytes. They still catch regressions in the
-// deserialization path, but a disagreement between them and real AWS would
-// mean the seed is wrong, not the collector.
+// --- Ground truth: captured from a second real account (sg-membership) ---
 
 #[tokio::test]
-async fn seed_instance_survives_the_wire() {
-    let rec = instance_seed();
+async fn captured_sg_membership_security_groups_survive_the_wire() {
+    // The first captured recording only proved the self-reference case (a
+    // group trusting itself). This one has a group trusting a *different*
+    // group — a cross-group `UserIdGroupPair` — which is the shape the
+    // `sg_membership` semantic-drift relation actually depends on.
+    let rec = sg_membership();
+    let live = security_group::fetch(&replay_client(&rec, &["DescribeSecurityGroups"]))
+        .await
+        .unwrap();
+
+    assert_eq!(live.len(), 3);
+    let web = live
+        .iter()
+        .find(|sg| sg.attributes["name"] == "uncia-capture-web")
+        .expect("web group present");
+    let app = live
+        .iter()
+        .find(|sg| sg.attributes["name"] == "uncia-capture-app")
+        .expect("app group present");
+
+    let ingress = &web.attributes["ingress"][0];
+    assert_eq!(ingress["protocol"], "tcp");
+    assert_eq!(ingress["from_port"], 443);
+    assert_eq!(ingress["to_port"], 443);
+    assert_eq!(ingress["self"], false);
+    assert_eq!(
+        ingress["security_groups"],
+        serde_json::json!([app.cloud_id])
+    );
+}
+
+#[tokio::test]
+async fn captured_sg_membership_instances_survive_the_wire() {
+    let rec = sg_membership();
     let live = ec2::fetch(&replay_client(&rec, &["DescribeInstances"]))
         .await
         .unwrap();
 
-    assert_eq!(live.len(), 1);
-    let instance = &live[0];
-    assert_eq!(instance.cloud_id, "i-00000000000000001");
-    assert_eq!(instance.kind, ResourceKind::AwsInstance);
-    assert_eq!(instance.attributes["instance_type"], "t3.medium");
-    assert_eq!(instance.attributes["ami"], "ami-00000000000000001");
-    assert_eq!(
-        instance.attributes["vpc_security_group_ids"],
-        serde_json::json!(["sg-00000000000000001"])
-    );
+    assert_eq!(live.len(), 2);
+    for instance in &live {
+        assert_eq!(instance.kind, ResourceKind::AwsInstance);
+        assert_eq!(instance.attributes["instance_type"], "t3.micro");
+        assert_eq!(
+            instance.attributes["metadata_options"][0]["http_tokens"], "required",
+            "IMDSv2 required, confirmed against real bytes"
+        );
+    }
 
-    // The two normalizations most likely to break on a wire-format change.
-    assert_eq!(
-        instance.attributes["iam_instance_profile"], "app-role",
-        "instance-profile ARN should be reduced to the bare name"
+    let app_group = security_group::fetch(&replay_client(&rec, &["DescribeSecurityGroups"]))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sg| sg.attributes["name"] == "uncia-capture-app")
+        .unwrap()
+        .cloud_id;
+    assert!(
+        live.iter()
+            .all(|i| i.attributes["vpc_security_group_ids"] == serde_json::json!([app_group])),
+        "both instances are members of the trusted group: {live:?}"
     );
-    assert_eq!(
-        instance.attributes["metadata_options"][0]["http_tokens"],
-        "required"
-    );
-    assert_eq!(
-        instance.attributes["metadata_options"][0]["http_put_response_hop_limit"],
-        2
-    );
+}
+
+#[tokio::test]
+async fn captured_undeclared_instance_joining_a_trusted_group_is_semantic_drift() {
+    // The worked example from `docs/ARCHITECTURE.md` and `docs/SEMANTIC-DRIFT.md`,
+    // replayed end to end against real captured bytes rather than hand-built
+    // resources: `web` trusts `app` on 443, and the account has two real
+    // instances in `app` while state only declares one. Every field on every
+    // declared resource is byte-identical, so this can only surface through
+    // the semantic pass.
+    let declared =
+        uncia::state::parse(include_str!("fixtures/replay_state_sg_membership.json")).unwrap();
+    let report = uncia::diff::compare(&declared, &collect_sg_membership().await);
+
+    assert_eq!(report.drifts.len(), 1, "{:?}", report.drifts);
+    let drift = &report.drifts[0];
+    assert_eq!(drift.resource.0, "aws_security_group.web");
+
+    let DriftKind::SemanticChanged {
+        field, relation, ..
+    } = &drift.kind
+    else {
+        panic!("expected SemanticChanged, got {:?}", drift.kind);
+    };
+    assert_eq!(field, "ingress");
+    assert_eq!(relation, "sg_membership");
 }

@@ -1,0 +1,149 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.9.8",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_security_group.web",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "web",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "sg-00000000000000001",
+            "name": "uncia-capture-web",
+            "description": "uncia capture: trusts sg-app",
+            "vpc_id": "vpc-00000000000000004",
+            "tags": {},
+            "ingress": [
+              {
+                "from_port": 443,
+                "to_port": 443,
+                "protocol": "tcp",
+                "cidr_blocks": [],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": ["sg-00000000000000002"],
+                "self": false,
+                "description": ""
+              }
+            ],
+            "egress": [
+              {
+                "from_port": 0,
+                "to_port": 0,
+                "protocol": "-1",
+                "cidr_blocks": ["0.0.0.0/0"],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": false,
+                "description": ""
+              }
+            ]
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_security_group.app",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "app",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "sg-00000000000000002",
+            "name": "uncia-capture-app",
+            "description": "uncia capture: trusted group",
+            "vpc_id": "vpc-00000000000000004",
+            "tags": {},
+            "ingress": [],
+            "egress": [
+              {
+                "from_port": 0,
+                "to_port": 0,
+                "protocol": "-1",
+                "cidr_blocks": ["0.0.0.0/0"],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": false,
+                "description": ""
+              }
+            ]
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_security_group.default",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "default",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "sg-00000000000000003",
+            "name": "default",
+            "description": "default VPC security group",
+            "vpc_id": "vpc-00000000000000004",
+            "tags": { "test-ec2-collector": "" },
+            "ingress": [
+              {
+                "from_port": 0,
+                "to_port": 0,
+                "protocol": "-1",
+                "cidr_blocks": [],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": true,
+                "description": ""
+              }
+            ],
+            "egress": [
+              {
+                "from_port": 0,
+                "to_port": 0,
+                "protocol": "-1",
+                "cidr_blocks": ["0.0.0.0/0"],
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "security_groups": [],
+                "self": false,
+                "description": ""
+              }
+            ]
+          },
+          "sensitive_values": {}
+        },
+        {
+          "address": "aws_instance.worker",
+          "mode": "managed",
+          "type": "aws_instance",
+          "name": "worker",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "schema_version": 1,
+          "values": {
+            "id": "i-00000000000000007",
+            "instance_type": "t3.micro",
+            "ami": "ami-00000000000000012",
+            "tags": {},
+            "vpc_security_group_ids": ["sg-00000000000000002"],
+            "iam_instance_profile": "",
+            "metadata_options": [
+              {
+                "http_endpoint": "enabled",
+                "http_tokens": "required",
+                "http_put_response_hop_limit": 2,
+                "instance_metadata_tags": "disabled"
+              }
+            ]
+          },
+          "sensitive_values": {}
+        }
+      ]
+    }
+  }
+}

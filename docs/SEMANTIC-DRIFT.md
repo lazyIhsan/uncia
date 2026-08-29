@@ -1,8 +1,8 @@
 # Design: semantic drift
 
-**Status: phase 1 shipped.** The engine, the `sg_membership` relation, and the
-three guards are implemented in `src/diff/semantic/`; the end-to-end replay test
-is still blocked on a capture (see [Phasing](#phasing)). This document specifies
+**Status: phase 1 shipped, proven against real AWS bytes.** The engine, the
+`sg_membership` relation, the three guards, and the end-to-end replay test are
+all implemented and passing (see [Phasing](#phasing)). This document specifies
 the mechanism, fixes the decisions that are cheap now and expensive later, and
 names what it deliberately leaves unsettled.
 
@@ -369,29 +369,25 @@ the case it was built for. Layered:
    identically from attribute values.
 3. **Guard tests**, one per guard above — the authority check especially, since
    its failure mode is mass false positives.
-4. **End-to-end replay** of the worked example.
+4. **End-to-end replay** of the worked example. ✅ **Shipped** as
+   `captured_undeclared_instance_joining_a_trusted_group_is_semantic_drift` in
+   `tests/collector_replay.rs`.
 
-**Prerequisite for (4):** the current captured recording
-(`tests/recordings/aws-two-resources.json`) has one security group and zero
-instances, so it cannot express the scenario. It needs a fresh capture from a
-real account containing **two security groups (one referencing the other) and at
-least two instances in the referenced group, only one of which is in the state
-file.**
-
-Per `docs/TESTING.md` and the seed-versus-captured distinction already enforced
-in the replay tests, this must be **captured, not hand-written**. A hand-written
-recording of the flagship scenario would prove only that the engine agrees with
-the guess that was written to satisfy it. Capture via `cargo run --example
-capture_recording`; until then the end-to-end test is blocked and the layers
-above it carry the confidence.
+Layer 4 needed a capture the original recording couldn't provide: **two
+security groups (one referencing the other) and at least two instances in the
+referenced group, only one of which is in the state file.** That's
+`tests/recordings/aws-sg-membership.json` — captured, not hand-written, per
+`docs/TESTING.md`'s seed-versus-captured discipline. A hand-written recording
+of the flagship scenario would have proven only that the engine agrees with
+the guess written to satisfy it; this proves it against real AWS bytes.
 
 ## Phasing
 
 1. ~~Graph + `Relation` + `sg_membership` + `SemanticChanged` + `Unresolved`,
    with layers 1–3 of the testing plan.~~ **Shipped.** Behind no flag: it is
    additive, and the guards are the thing keeping it quiet.
-2. Capture the recording, land the end-to-end test. **Next, and the only thing
-   standing between this feature and being proven against real AWS bytes.**
+2. ~~Capture the recording, land the end-to-end test.~~ **Shipped.** The
+   feature is now proven against real AWS bytes, not just a hand-built graph.
 3. Second relation — `instance_exposure` (an instance's effective exposure is
    the union of its attached groups' rules), which reuses the machinery and
    validates that the trait is actually a seam and not a one-off.

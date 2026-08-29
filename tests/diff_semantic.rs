@@ -7,9 +7,8 @@
 //! users never experience.
 //!
 //! Layers 1-3 of the plan in `docs/SEMANTIC-DRIFT.md`. Layer 4, the end-to-end
-//! replay of the worked example, is blocked on a captured recording containing
-//! two security groups and two instances; hand-writing that recording would
-//! only prove the engine agrees with the guess written to satisfy it.
+//! replay of the worked example against real captured bytes, lives in
+//! `tests/collector_replay.rs` alongside the collectors it replays through.
 
 use serde_json::{Map, Value, json};
 
