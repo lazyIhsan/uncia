@@ -53,7 +53,7 @@ uncia distinguishes two kinds of drift:
   why it's the harder and more interesting half of the problem, and
   [`docs/SEMANTIC-DRIFT.md`](docs/SEMANTIC-DRIFT.md) for the design.
 
-The first semantic relation ships today: **security-group membership.** A rule
+Two semantic relations ship today. **Security-group membership:** a rule
 reading `allow 443 from sg-app` is byte-identical before and after someone
 attaches `sg-app` to an instance that isn't in your state file — every field on
 every declared resource still matches, so a field diff is *correct* to stay
@@ -67,12 +67,20 @@ $ uncia check --state state.json
     actual:   ["tcp/443-443/member:i-console","tcp/443-443/member:i-worker"]
 ```
 
+**Instance exposure** is the mirror image: an instance's own declared security
+groups can stay exactly as written while a rule gets added to one of them in
+the console, quietly widening what can reach that instance. Same shape, via
+the group the exposure came from, opposite direction — an instance's meaning
+resolved from the groups it references, rather than a group's meaning resolved
+from the instances that reference it.
+
 Every semantic finding carries the `via` path that produced it, so the claim is
 checkable against your account without reading uncia's source.
 
-`sg_membership` isn't the first of many equally-weighted relations — semantic
-drift in uncia is deliberately scoped to **network exposure**: security groups
-and whatever else determines what can reach what. See
+`sg_membership` and `instance_exposure` aren't the first two of many
+equally-weighted relations — semantic drift in uncia is deliberately scoped to
+**network exposure**: security groups and whatever else determines what can
+reach what. See
 [why network-exposure drift, not general drift](docs/ARCHITECTURE.md#why-network-exposure-drift-not-general-drift)
 for the reasoning and the relations planned next inside that niche.
 
@@ -84,7 +92,7 @@ Pre-1.0, actively developed, no packaged releases yet.
 |---|---|
 | Declared-state inputs | `terraform show -json`, `tofu show -json`, raw `.tfstate` (auto-detected) |
 | Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules) |
-| Drift detection | Behavioral (literal field diff) + semantic (security-group membership) |
+| Drift detection | Behavioral (literal field diff) + semantic (security-group membership, instance exposure) |
 | History / TUI | In progress (`src/store`, `src/tui`), not yet wired to the CLI |
 
 Full scope, including what's deliberately *not* supported and why, is in the

@@ -47,11 +47,22 @@ pub trait Relation {
     /// carries the reason the subject could not be resolved, which becomes an
     /// [`Unresolved`] rather than a finding.
     fn expand(&self, subject: &Node, graph: &Graph) -> Result<Value, String>;
+
+    /// The cloud IDs a subject's stored value points at, reported on every
+    /// finding as `via` — the path that makes a semantic claim checkable
+    /// against the account without reading this source. Must never be empty
+    /// for a subject [`expand`](Relation::expand) resolved successfully; a
+    /// relation whose findings would have no path to report should fail
+    /// resolution in `expand` instead.
+    fn via(&self, subject: &Node) -> Vec<String>;
 }
 
 /// Every relation shipped in the open catalog.
 fn catalog() -> Vec<Box<dyn Relation>> {
-    vec![Box::new(relations::SgMembership)]
+    vec![
+        Box::new(relations::SgMembership),
+        Box::new(relations::InstanceExposure),
+    ]
 }
 
 /// Append semantic findings to a report that already holds the behavioral pass.
@@ -142,7 +153,7 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
                 continue;
             }
 
-            let via = relations::referenced_groups(declared_node);
+            let via = relation.via(declared_node);
             if via.is_empty() {
                 // A finding whose path cannot be stated is unfalsifiable, and
                 // users mute unfalsifiable claims. Refuse to emit one.

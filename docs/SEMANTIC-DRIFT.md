@@ -1,9 +1,10 @@
 # Design: semantic drift
 
-**Status: phase 1 shipped, proven against real AWS bytes.** The engine, the
-`sg_membership` relation, the three guards, and the end-to-end replay test are
-all implemented and passing (see [Phasing](#phasing)). This document specifies
-the mechanism, fixes the decisions that are cheap now and expensive later, and
+**Status: phase 1 shipped, proven against real AWS bytes, and generalized to a
+second relation.** The engine, the `sg_membership` and `instance_exposure`
+relations, the three guards, and the end-to-end replay test are all
+implemented and passing (see [Phasing](#phasing)). This document specifies the
+mechanism, fixes the decisions that are cheap now and expensive later, and
 names what it deliberately leaves unsettled.
 
 Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — this document assumes the
@@ -17,7 +18,8 @@ to be in the room; semantic drift is why anyone stays."* But the architecture
 doc only gives examples of it. Examples are not a specification — they do not
 say what to compare against, where the dependency graph comes from, or how a
 finding stays falsifiable. This closes that gap for one relation, end to end,
-and leaves a shape the rest can follow.
+and leaves a shape the rest can follow — `instance_exposure` is that shape
+followed once, in the opposite direction, and it held.
 
 ## The problem, stated precisely
 
@@ -388,9 +390,15 @@ the guess written to satisfy it; this proves it against real AWS bytes.
    additive, and the guards are the thing keeping it quiet.
 2. ~~Capture the recording, land the end-to-end test.~~ **Shipped.** The
    feature is now proven against real AWS bytes, not just a hand-built graph.
-3. Second relation — `instance_exposure` (an instance's effective exposure is
-   the union of its attached groups' rules), which reuses the machinery and
-   validates that the trait is actually a seam and not a one-off.
+3. ~~Second relation — `instance_exposure`.~~ **Shipped.** An instance's
+   effective exposure is the union of its attached groups' ingress rules — the
+   mirror image of `sg_membership`, resolving an instance's meaning from the
+   groups it references instead of a group's meaning from the instances that
+   reference it. It validated the trait, and found one real gap: `via` had
+   been a bare function reading `ingress.security_groups`, which only
+   `sg_membership`'s shape could ever satisfy. It is now a `Relation` method
+   each relation implements for its own subject; `instance_exposure` reports
+   the security groups a subject is attached to.
 4. Reassess (b) — the temporal baseline — only once the store is real. It is
    the only path to undeclared dependencies like managed IAM policies, and it
    needs its own design pass, not a paragraph here.

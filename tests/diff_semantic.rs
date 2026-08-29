@@ -71,6 +71,37 @@ fn live_sg(id: &str, trusts: &[&str]) -> LiveResource {
     live(id, ResourceKind::AwsSecurityGroup, sg_attrs(id, trusts))
 }
 
+/// A security group whose ingress allows `port` from `cidr` — a literal
+/// rule, not a group reference, for `instance_exposure` scenarios.
+fn sg_open_attrs(id: &str, ports: &[i64]) -> Value {
+    let ingress: Vec<Value> = ports
+        .iter()
+        .map(|p| {
+            json!({
+                "from_port": p, "to_port": p, "protocol": "tcp",
+                "cidr_blocks": ["0.0.0.0/0"], "ipv6_cidr_blocks": [], "prefix_list_ids": [],
+                "security_groups": [], "self": false,
+            })
+        })
+        .collect();
+    json!({
+        "id": id, "name": id, "description": "d", "vpc_id": "vpc-1", "tags": {},
+        "ingress": ingress, "egress": [],
+    })
+}
+
+fn declared_sg_open(address: &str, id: &str, ports: &[i64]) -> Resource {
+    declared(
+        address,
+        ResourceKind::AwsSecurityGroup,
+        sg_open_attrs(id, ports),
+    )
+}
+
+fn live_sg_open(id: &str, ports: &[i64]) -> LiveResource {
+    live(id, ResourceKind::AwsSecurityGroup, sg_open_attrs(id, ports))
+}
+
 fn declared_instance(address: &str, id: &str, sgs: &[&str]) -> Resource {
     declared(address, ResourceKind::AwsInstance, instance_attrs(id, sgs))
 }
@@ -398,6 +429,7 @@ fn groups_with_no_group_sourced_rules_are_never_reported() {
                 "egress": [],
             }),
         ),
+        declared_sg("aws_security_group.app", "sg-app", &[]),
         declared_instance("aws_instance.worker", "i-worker", &["sg-app"]),
     ];
     let live = [
@@ -415,6 +447,7 @@ fn groups_with_no_group_sourced_rules_are_never_reported() {
                 "egress": [],
             }),
         ),
+        live_sg("sg-app", &[]),
         live_instance("i-worker", &["sg-app"]),
         live_instance("i-console", &["sg-app"]),
     ];
@@ -422,4 +455,221 @@ fn groups_with_no_group_sourced_rules_are_never_reported() {
     let report = compare(&declared, &live);
     assert!(report.drifts.is_empty(), "{:?}", report.drifts);
     assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+}
+
+// --- InstanceExposure: the mirror-image relation ---
+//
+// Where `sg_membership` resolves a group's meaning from the instances that
+// reference it, `instance_exposure` resolves an instance's meaning from the
+// groups it references — proving the guards and the trait generalize past
+// the one relation they were built for.
+
+/// Unlike the `sg_membership` flagship (where the undeclared party is a
+/// live-only instance, so nothing on the group side ever drifts), widening an
+/// already-declared group's rules is unavoidably *also* behavioral drift on
+/// that group — there is no way to change a declared group's live rules
+/// without it. So this is the "a cause that drifted behaviorally does not
+/// suppress the consequence" shape from the start, not the single-finding
+/// shape: the group's own drift is the cause, and every instance attached to
+/// it gets the consequence.
+#[test]
+fn a_console_rule_on_an_attached_group_reads_as_exposure_drift_on_the_instance() {
+    let declared = [
+        declared_sg_open("aws_security_group.app", "sg-app", &[443]),
+        declared_instance("aws_instance.worker", "i-worker", &["sg-app"]),
+    ];
+    let live = [
+        live_sg_open("sg-app", &[443, 22]),
+        live_instance("i-worker", &["sg-app"]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    assert!(
+        report.drifts.iter().any(|d| {
+            d.resource.0 == "aws_security_group.app"
+                && matches!(&d.kind, DriftKind::FieldChanged { field, .. } if field == "ingress")
+        }),
+        "the cause: {:?}",
+        report.drifts
+    );
+
+    let consequence = report
+        .drifts
+        .iter()
+        .find(|d| d.resource.0 == "aws_instance.worker")
+        .expect("expected an exposure finding on the instance");
+    assert_eq!(
+        consequence.severity,
+        Severity::High,
+        "more ports reachable than declared"
+    );
+
+    let DriftKind::SemanticChanged {
+        field,
+        relation,
+        declared_effective,
+        actual_effective,
+        via,
+    } = &consequence.kind
+    else {
+        panic!("expected SemanticChanged, got {:?}", consequence.kind);
+    };
+    assert_eq!(field, "vpc_security_group_ids");
+    assert_eq!(relation, "instance_exposure");
+    assert_eq!(via, &["sg-app"], "the path that explains the finding");
+    assert_eq!(declared_effective, &json!(["tcp/443-443/cidr:0.0.0.0/0"]));
+    assert_eq!(
+        actual_effective,
+        &json!(["tcp/22-22/cidr:0.0.0.0/0", "tcp/443-443/cidr:0.0.0.0/0"])
+    );
+}
+
+#[test]
+fn matching_exposure_is_not_drift() {
+    let declared = [
+        declared_sg_open("aws_security_group.app", "sg-app", &[443]),
+        declared_instance("aws_instance.worker", "i-worker", &["sg-app"]),
+    ];
+    let live = [
+        live_sg_open("sg-app", &[443]),
+        live_instance("i-worker", &["sg-app"]),
+    ];
+
+    let report = compare(&declared, &live);
+    assert!(report.drifts.is_empty(), "{:?}", report.drifts);
+    assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+}
+
+#[test]
+fn an_instances_own_group_list_changing_gets_only_the_behavioral_finding() {
+    // `worker`'s own `vpc_security_group_ids` changed, so this is behavioral
+    // drift by definition; reporting a semantic finding for the same subject
+    // and field would be reporting the same thing twice.
+    let declared = [
+        declared_sg_open("aws_security_group.app", "sg-app", &[443]),
+        declared_sg_open("aws_security_group.extra", "sg-extra", &[22]),
+        declared_instance("aws_instance.worker", "i-worker", &["sg-app"]),
+    ];
+    let live = [
+        live_sg_open("sg-app", &[443]),
+        live_sg_open("sg-extra", &[22]),
+        live_instance("i-worker", &["sg-app", "sg-extra"]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    let on_worker: Vec<_> = report
+        .drifts
+        .iter()
+        .filter(|d| d.resource.0 == "aws_instance.worker")
+        .collect();
+    assert_eq!(on_worker.len(), 1, "{on_worker:?}");
+    assert!(
+        matches!(&on_worker[0].kind, DriftKind::FieldChanged { field, .. } if field == "vpc_security_group_ids"),
+        "{:?}",
+        on_worker[0].kind
+    );
+}
+
+#[test]
+fn a_state_file_declaring_no_security_groups_reports_no_exposure_drift() {
+    // The load-bearing guard, mirrored: a state file that declares instances
+    // but no security groups is not an authority on what those groups (owned
+    // by a different state file, or not declared at all) currently allow.
+    let declared = [declared_instance(
+        "aws_instance.worker",
+        "i-worker",
+        &["sg-app"],
+    )];
+    let live = [
+        live_sg_open("sg-app", &[443]),
+        live_instance("i-worker", &["sg-app"]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    assert!(
+        report.drifts.is_empty(),
+        "must not fabricate drift from a non-authoritative state file: {:?}",
+        report.drifts
+    );
+    let unresolved = report
+        .unresolved
+        .iter()
+        .find(|u| u.relation == "instance_exposure")
+        .expect("expected an unresolved instance_exposure entry");
+    assert!(
+        unresolved.resource.is_none(),
+        "the state file is not authoritative, not any one resource"
+    );
+    assert!(
+        unresolved.reason.contains("aws_security_group"),
+        "{}",
+        unresolved.reason
+    );
+}
+
+#[test]
+fn an_attached_group_missing_from_declared_state_is_unresolved_not_a_narrowing_finding() {
+    // `worker` is attached to a group this state file never declares — a
+    // real layout (network and compute split across state files), and the
+    // honest report is "can't resolve," not a confident claim that exposure
+    // shrank to nothing.
+    let declared = [
+        declared_sg_open("aws_security_group.other", "sg-other", &[]),
+        declared_instance("aws_instance.worker", "i-worker", &["sg-app"]),
+    ];
+    let live = [live_instance("i-worker", &["sg-app"])];
+
+    let report = compare(&declared, &live);
+
+    assert!(
+        !report
+            .drifts
+            .iter()
+            .any(|d| matches!(d.kind, DriftKind::SemanticChanged { .. })),
+        "{:?}",
+        report.drifts
+    );
+    let unresolved = report
+        .unresolved
+        .iter()
+        .find(|u| {
+            u.resource
+                .as_ref()
+                .is_some_and(|r| r.0 == "aws_instance.worker")
+        })
+        .expect("expected an Unresolved for worker");
+    assert_eq!(unresolved.relation, "instance_exposure");
+    assert!(
+        unresolved.reason.contains("sg-app"),
+        "{}",
+        unresolved.reason
+    );
+}
+
+#[test]
+fn a_removed_console_rule_is_low_severity_exposure_drift() {
+    // Fewer ports reachable than declared. Still drift, still worth
+    // reporting, but not the alarming direction.
+    let declared = [
+        declared_sg_open("aws_security_group.app", "sg-app", &[443, 22]),
+        declared_instance("aws_instance.worker", "i-worker", &["sg-app"]),
+    ];
+    let live = [
+        live_sg_open("sg-app", &[443]),
+        live_instance("i-worker", &["sg-app"]),
+    ];
+
+    let report = compare(&declared, &live);
+    let consequence = report
+        .drifts
+        .iter()
+        .find(|d| {
+            d.resource.0 == "aws_instance.worker"
+                && matches!(d.kind, DriftKind::SemanticChanged { .. })
+        })
+        .expect("expected an exposure finding");
+    assert_eq!(consequence.severity, Severity::Low);
 }
