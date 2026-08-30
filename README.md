@@ -67,6 +67,12 @@ $ uncia check --state state.json
     actual:   ["tcp/443-443/member:i-console","tcp/443-443/member:i-worker"]
 ```
 
+`sg-app` doesn't have to gain an instance for this to fire — an ALB or NLB
+attached to it counts too. Its ENI carries the security group exactly like an
+instance carries `vpc_security_group_ids`, so a load balancer provisioned
+outside Terraform and attached to a trusted group reads as the same kind of
+drift.
+
 **Instance exposure** is the mirror image: an instance's own declared security
 groups can stay exactly as written while a rule gets added to one of them in
 the console, quietly widening what can reach that instance. Same shape, via
@@ -91,7 +97,7 @@ Pre-1.0, actively developed, no packaged releases yet.
 | | |
 |---|---|
 | Declared-state inputs | `terraform show -json`, `tofu show -json`, raw `.tfstate` (auto-detected) |
-| Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules) |
+| Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules), Load Balancers (membership only — see below) |
 | Drift detection | Behavioral (literal field diff) + semantic (security-group membership, instance exposure) |
 | History / TUI | In progress (`src/store`, `src/tui`), not yet wired to the CLI |
 

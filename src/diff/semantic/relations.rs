@@ -12,9 +12,16 @@ use super::graph::{Graph, Node};
 use crate::diff::rules::{explode_rules, rule_base};
 use crate::types::resource::ResourceKind;
 
+/// Members a rule referencing a security group can admit. An ALB's ENI
+/// carries whatever security groups the load balancer names, exactly like an
+/// EC2 instance carries `vpc_security_group_ids` — both are "who is in this
+/// group," just discovered through different edge fields.
+const MEMBER_KINDS: &[ResourceKind] = &[ResourceKind::AwsInstance, ResourceKind::AwsLoadBalancer];
+
 /// Security-group membership: a rule that trusts another group effectively
 /// trusts whatever is *in* that group, and the group's own attributes say
-/// nothing about that.
+/// nothing about that. "In" means an EC2 instance or a load balancer that
+/// names the group — [`MEMBER_KINDS`].
 ///
 /// This is the relation `docs/ARCHITECTURE.md` uses to motivate semantic drift.
 /// A rule reading `allow 443 from sg-app` is byte-identical before and after
@@ -30,6 +37,19 @@ impl Relation for SgMembership {
     fn requires(&self) -> &[ResourceKind] {
         // Membership is derived from the instance side, so a state file that
         // declares no instances is not an authority on it.
+        //
+        // Deliberately does *not* also require `AwsLoadBalancer`: that would
+        // make this relation go fully unresolved for every subject in the
+        // (very common) case of a stack with no load balancers at all — a
+        // regression, not a correctness fix. The residual risk is narrower
+        // than it looks: a referenced group that isn't declared at all is
+        // already caught below (`Err` when `graph.node` misses), and a false
+        // "membership grew" from an undeclared load balancer can only happen
+        // when the *group* is declared here but the load balancer using it
+        // lives in a different state file — narrower than the instance/network
+        // split this guard was built for, since a security group made for one
+        // load balancer is typically declared alongside it. Known, narrow,
+        // and documented rather than solved with a second relation.
         &[ResourceKind::AwsInstance]
     }
 
@@ -37,7 +57,7 @@ impl Relation for SgMembership {
         (ResourceKind::AwsSecurityGroup, "ingress")
     }
 
-    /// Expand each group-sourced rule into one atom per member instance.
+    /// Expand each group-sourced rule into one atom per member.
     ///
     /// Only group-sourced atoms are produced. CIDR and prefix-list sources are
     /// literal — they cannot differ between the two sides here, because the
@@ -78,8 +98,10 @@ impl Relation for SgMembership {
                     ));
                 }
 
-                for member in graph.referrers(source, &ResourceKind::AwsInstance) {
-                    atoms.push(format!("{base}/member:{member}"));
+                for kind in MEMBER_KINDS {
+                    for member in graph.referrers(source, kind) {
+                        atoms.push(format!("{base}/member:{member}"));
+                    }
                 }
             }
         }
@@ -321,6 +343,88 @@ mod tests {
     fn via_lists_the_groups_a_subject_trusts() {
         let web = sg_trusting("sg-app");
         assert_eq!(referenced_groups(&subject(&web)), vec!["sg-app"]);
+    }
+
+    // --- SgMembership: load balancers as members ---
+
+    fn lb_in(sgs: Value) -> Map<String, Value> {
+        attrs(json!({"security_groups": sgs}))
+    }
+
+    #[test]
+    fn a_load_balancer_attached_to_the_trusted_group_is_a_member() {
+        let web = sg_trusting("sg-app");
+        let app = attrs(json!({"name": "app"}));
+        let alb = lb_in(json!(["sg-app"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &app),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+            ]
+            .into_iter(),
+        );
+
+        let effective = SgMembership.expand(&subject(&web), &g).unwrap();
+        assert_eq!(effective, json!(["tcp/443-443/member:arn:alb/1"]));
+    }
+
+    #[test]
+    fn membership_includes_instances_and_load_balancers_together() {
+        let web = sg_trusting("sg-app");
+        let app = attrs(json!({"name": "app"}));
+        let worker = instance_in(json!(["sg-app"]));
+        let alb = lb_in(json!(["sg-app"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &app),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+            ]
+            .into_iter(),
+        );
+
+        let effective = SgMembership.expand(&subject(&web), &g).unwrap();
+        assert_eq!(
+            effective,
+            json!([
+                "tcp/443-443/member:arn:alb/1",
+                "tcp/443-443/member:i-worker"
+            ])
+        );
+    }
+
+    #[test]
+    fn a_load_balancer_attaching_to_a_trusted_group_widens_the_effective_set() {
+        // The load-balancer-shaped version of the flagship scenario: same
+        // rule, an ALB starts carrying the trusted group. Nothing on `web` or
+        // `app` moved, so this can only surface through the semantic pass.
+        let web = sg_trusting("sg-app");
+        let app = attrs(json!({"name": "app"}));
+        let alb = lb_in(json!(["sg-app"]));
+
+        let declared = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &app),
+            ]
+            .into_iter(),
+        );
+        let live = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &app),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+            ]
+            .into_iter(),
+        );
+
+        let before = SgMembership.expand(&subject(&web), &declared).unwrap();
+        let after = SgMembership.expand(&subject(&web), &live).unwrap();
+
+        assert_eq!(before, json!([]));
+        assert_eq!(after, json!(["tcp/443-443/member:arn:alb/1"]));
     }
 
     // --- InstanceExposure ---

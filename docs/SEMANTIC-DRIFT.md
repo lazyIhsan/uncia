@@ -227,6 +227,16 @@ This relation is the right pilot for three reasons: it is the exact scenario
 already normalized on both sides), and it reuses `explode_rules` from
 `behavioral.rs`, so the atom canonicalization stays in one place.
 
+**Membership now has two kinds of member.** An ALB's ENI carries whatever
+security groups the load balancer names, exactly like an instance carries
+`vpc_security_group_ids` — `src/diff/semantic/relations.rs`'s `MEMBER_KINDS`
+searches `[AwsInstance, AwsLoadBalancer]` and tags both the same atom shape
+(`{base}/member:{id}`). No new relation: a rule like `allow 443 from sg-alb`
+used to resolve to zero members, silently, because nothing searched for
+non-instance holders of `sg-alb`. `requires()` stays `[AwsInstance]` only —
+see the authority-check discussion below for why adding `AwsLoadBalancer`
+there would be a regression, not a fix.
+
 ## Types
 
 ```rust
@@ -299,6 +309,21 @@ without this guard, report semantic drift on every SG-sourced rule in the
 account. That is not a hypothetical — splitting network and compute into
 separate state files is a common layout. So: `requires()` unsatisfied in
 declared state → one `Unresolved`, not a pile of drift.
+
+**Why `requires()` didn't grow when load balancers became a second member
+kind.** Adding `AwsLoadBalancer` to `sg_membership`'s `requires()` would make
+the relation go fully `Unresolved` for *every* subject the moment a state
+file declares zero load balancers — the common case, not a corner one, so
+that would be a regression rather than a correctness fix. The residual risk
+is narrower than it looks: a referenced group that isn't declared at all is
+already caught (the missing-group `Err` in `expand`, unchanged), so a false
+"membership grew" from an undeclared load balancer can only happen when the
+*group* is declared in this state file but the load balancer using it lives
+in a different one — narrower than the network/compute split this guard was
+built for, since a security group made for one load balancer is typically
+declared alongside it. Known, narrow, and documented in
+`src/diff/semantic/relations.rs` rather than solved with a second relation or
+a per-kind authority signature — see that file for the full reasoning.
 
 **3. Widening versus narrowing.** An effective set that *grew* (more principals
 can reach something) and one that *shrank* are both divergence, and both are

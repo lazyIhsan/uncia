@@ -128,10 +128,12 @@ yourself, which defeats the point of automating the check at all.
 boundary still mean what the Terraform says it means," and there is real
 depth to build there before uncia needs to leave it. `instance_exposure` — an
 instance's effective exposure is the union of its attached groups' rules —
-shipped in phase 3 of [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md); still ahead:
+shipped in phase 3 of [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md). `sg_membership`
+now also resolves an ALB/NLB as a member of a group it's attached to, not just
+direct EC2 attachment — an ALB's ENI carries whatever security groups the
+load balancer names, exactly like an instance carries
+`vpc_security_group_ids`; still ahead:
 
-- security-group membership resolved through an ALB/NLB target group or
-  listener, not just direct EC2 attachment
 - the same membership question for Lambda ENIs, RDS, and ECS tasks — anything
   else that can sit inside a security group
 - NACL interaction — a security-group rule can be declared correctly and

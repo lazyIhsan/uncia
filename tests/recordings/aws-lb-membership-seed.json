@@ -1,0 +1,12 @@
+{
+  "scenario": "aws-lb-membership-seed",
+  "note": "SEED RECORDING — hand-written from the documented ELBv2 query-protocol wire format (note: list items wrap in <member>, not EC2's <item>), NOT captured from a real account. It exercises the SDK's XML deserialization path for DescribeLoadBalancers and locks a regression baseline, but it does not prove AWS emits exactly these bytes. Replace it by running `cargo run --example capture_recording` against an account with a real ALB or NLB provisioned; see docs/TESTING.md.",
+  "region": "us-east-1",
+  "responses": [
+    {
+      "operation": "DescribeLoadBalancers",
+      "status": 200,
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DescribeLoadBalancersResponse xmlns=\"https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/\">\n  <DescribeLoadBalancersResult>\n    <LoadBalancers>\n      <member>\n        <LoadBalancerArn>arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/uncia-seed-alb/0000000000000001</LoadBalancerArn>\n        <LoadBalancerName>uncia-seed-alb</LoadBalancerName>\n        <Type>application</Type>\n        <SecurityGroups>\n          <member>sg-00000000000000001</member>\n        </SecurityGroups>\n      </member>\n      <member>\n        <LoadBalancerArn>arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/net/uncia-seed-nlb/0000000000000002</LoadBalancerArn>\n        <LoadBalancerName>uncia-seed-nlb</LoadBalancerName>\n        <Type>network</Type>\n        <SecurityGroups/>\n      </member>\n    </LoadBalancers>\n  </DescribeLoadBalancersResult>\n  <ResponseMetadata>\n    <RequestId>00000000-0000-0000-0000-000000000001</RequestId>\n  </ResponseMetadata>\n</DescribeLoadBalancersResponse>\n"
+    }
+  ]
+}

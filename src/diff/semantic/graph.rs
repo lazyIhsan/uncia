@@ -28,8 +28,10 @@ use crate::types::resource::ResourceKind;
 ///
 /// This table is the whole of edge discovery: adding a relation that needs a
 /// new edge kind means adding a row here, not touching [`build`].
-const EDGE_FIELDS: &[(ResourceKind, &str)] =
-    &[(ResourceKind::AwsInstance, "vpc_security_group_ids")];
+const EDGE_FIELDS: &[(ResourceKind, &str)] = &[
+    (ResourceKind::AwsInstance, "vpc_security_group_ids"),
+    (ResourceKind::AwsLoadBalancer, "security_groups"),
+];
 
 /// One resource in the graph, as observed on whichever side built it.
 #[derive(Debug, Clone)]
