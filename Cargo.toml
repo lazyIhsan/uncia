@@ -21,13 +21,14 @@ aws-config = "1"
 aws-sdk-ec2 = "1"
 aws-sdk-elasticloadbalancingv2 = "1"
 clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# Likely additions as implementation lands:
-#   rusqlite            — drift history persistence (store::sqlite)
-#   ratatui / crossterm — terminal UI (tui)
+# Likely addition once store::sqlite lands for real:
+#   rusqlite — drift history persistence
 
 # Replay-harness support: recorded AWS responses are fed back through the real
 # SDK so collector tests exercise wire-format deserialization offline. See
