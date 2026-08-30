@@ -110,6 +110,22 @@ fn live_instance(id: &str, sgs: &[&str]) -> LiveResource {
     live(id, ResourceKind::AwsInstance, instance_attrs(id, sgs))
 }
 
+fn live_lb(arn: &str, sgs: &[&str]) -> LiveResource {
+    live(
+        arn,
+        ResourceKind::AwsLoadBalancer,
+        json!({"id": arn, "security_groups": sgs}),
+    )
+}
+
+fn declared_lb(address: &str, arn: &str, sgs: &[&str]) -> Resource {
+    declared(
+        address,
+        ResourceKind::AwsLoadBalancer,
+        json!({"id": arn, "security_groups": sgs}),
+    )
+}
+
 /// The scenario the whole feature exists for, from `docs/ARCHITECTURE.md`:
 /// `web` trusts `sg-app` on 443, and someone attaches `sg-app` to an instance
 /// that is in no state file. Every field on every declared resource is
@@ -672,4 +688,95 @@ fn a_removed_console_rule_is_low_severity_exposure_drift() {
         })
         .expect("expected an exposure finding");
     assert_eq!(consequence.severity, Severity::Low);
+}
+
+// --- sg_membership: load balancers as members ---
+//
+// A load balancer's ENI carries whatever security groups it names, exactly
+// like an EC2 instance carries `vpc_security_group_ids` — `sg_membership`
+// discovers both as members of a group they're attached to.
+
+#[test]
+fn an_undeclared_load_balancer_joining_a_trusted_group_is_drift() {
+    // The load-balancer-shaped version of the original flagship: `web` trusts
+    // `sg-app` on 443, and an ALB — a brand-new live-only resource nobody has
+    // to declare — starts carrying `sg-app`. Every field on every declared
+    // resource is byte-identical, so only the semantic pass can see it. Unlike
+    // `instance_exposure`'s worked example, this recovers the clean
+    // single-finding shape: nothing declared needs to change for an ALB to
+    // start carrying a security group.
+    let declared = [
+        declared_sg("aws_security_group.web", "sg-web", &["sg-app"]),
+        declared_sg("aws_security_group.app", "sg-app", &[]),
+        // `sg_membership`'s authority guard is keyed on `AwsInstance` alone
+        // (see `SgMembership::requires`), so at least one declared instance
+        // is needed for the relation to resolve at all — unrelated to `sg-app`
+        // here, purely to satisfy the guard.
+        declared_instance("aws_instance.other", "i-other", &[]),
+    ];
+    let live = [
+        live_sg("sg-web", &["sg-app"]),
+        live_sg("sg-app", &[]),
+        live_instance("i-other", &[]),
+        // Provisioned outside Terraform, attached to the trusted group.
+        live_lb(
+            "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-alb/1",
+            &["sg-app"],
+        ),
+    ];
+
+    let report = compare(&declared, &live);
+
+    assert_eq!(report.drifts.len(), 1, "{:?}", report.drifts);
+    let drift = &report.drifts[0];
+    assert_eq!(drift.resource.0, "aws_security_group.web");
+    assert_eq!(
+        drift.severity,
+        Severity::High,
+        "membership grew: the ALB can now reach 443"
+    );
+
+    let DriftKind::SemanticChanged {
+        field,
+        relation,
+        declared_effective,
+        actual_effective,
+        via,
+    } = &drift.kind
+    else {
+        panic!("expected SemanticChanged, got {:?}", drift.kind);
+    };
+    assert_eq!(field, "ingress");
+    assert_eq!(relation, "sg_membership");
+    assert_eq!(via, &["sg-app"]);
+    assert_eq!(declared_effective, &json!([]));
+    assert_eq!(
+        actual_effective,
+        &json!([
+            "tcp/443-443/member:arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-alb/1"
+        ])
+    );
+}
+
+#[test]
+fn matching_load_balancer_membership_is_not_drift() {
+    // The ALB is declared too this time (e.g. via `aws_lb` + a
+    // `security_groups` argument referencing `sg-app`), so both sides agree.
+    let arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-alb/1";
+    let declared = [
+        declared_sg("aws_security_group.web", "sg-web", &["sg-app"]),
+        declared_sg("aws_security_group.app", "sg-app", &[]),
+        declared_lb("aws_lb.app", arn, &["sg-app"]),
+        declared_instance("aws_instance.other", "i-other", &[]),
+    ];
+    let live = [
+        live_sg("sg-web", &["sg-app"]),
+        live_sg("sg-app", &[]),
+        live_lb(arn, &["sg-app"]),
+        live_instance("i-other", &[]),
+    ];
+
+    let report = compare(&declared, &live);
+    assert!(report.drifts.is_empty(), "{:?}", report.drifts);
+    assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
 }

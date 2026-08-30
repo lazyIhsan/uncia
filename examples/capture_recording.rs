@@ -96,6 +96,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // ELBv2 is a separate generated SDK crate with its own client and config
+    // types, so it gets its own loop rather than a third entry above — an API
+    // call always produces a response, so an account with zero load balancers
+    // still captures one (empty) response, same "real empty vs. failed
+    // capture" distinction as the EC2 calls.
+    {
+        let operation = "DescribeLoadBalancers";
+        let recorder = ResponseRecorder::default();
+        let config = aws_sdk_elasticloadbalancingv2::config::Builder::from(&base)
+            .interceptor(recorder.clone())
+            .build();
+        let client = aws_sdk_elasticloadbalancingv2::Client::from_conf(config);
+
+        let count = uncia::collector::aws::load_balancer::fetch(&client)
+            .await?
+            .len();
+        let captured = recorder.take();
+        eprintln!(
+            "{operation}: {count} resource(s), {} response(s) captured",
+            captured.len()
+        );
+
+        if captured.is_empty() {
+            return Err(format!(
+                "{operation} returned {count} resource(s) but no response was captured — \
+                 the recording hook is not seeing response bodies; refusing to write an \
+                 empty recording"
+            )
+            .into());
+        }
+
+        for (status, body) in captured {
+            responses.push(json!({
+                "operation": operation,
+                "status": status,
+                "body": scrubber.scrub(&body),
+            }));
+        }
+    }
+
     let recording = json!({
         "scenario": "captured",
         "note": format!(
@@ -201,6 +241,14 @@ impl Scrubber {
             (r"\bsnap-[0-9a-f]{8,17}\b", "snap"),
             (r"\br-[0-9a-f]{8,17}\b", "r"),
             (r"\bpl-[0-9a-f]{6,17}\b", "pl"),
+            // ELBv2 resources are ARNs, not short prefixed ids — the account
+            // digits get scrubbed by the account-id pattern below, but the
+            // trailing hex id AWS assigns (e.g.
+            // `loadbalancer/app/my-alb/50dc6c495c0c9188`) does not, so it gets
+            // its own pattern. The load balancer's own *name* is left alone,
+            // same as security group names — it's real declared config, not
+            // a random identifier.
+            (r"\b[0-9a-f]{16}\b", "elbid"),
             // IAM principal ids.
             (r"\b(?:AIPA|AROA|AIDA|ASIA|AKIA)[A-Z0-9]{8,}\b", "principal"),
             // Account ids.
@@ -325,6 +373,24 @@ mod tests {
         assert!(!out.contains("987654321098"), "account id survived: {out}");
         // The profile *name* is meaningful to the diff and must survive.
         assert!(out.ends_with("instance-profile/app-role"), "got: {out}");
+    }
+
+    #[test]
+    fn elbv2_arn_tail_is_scrubbed_but_name_and_account_are_handled_separately() {
+        let mut scrubber = Scrubber::new();
+        let out = scrubber.scrub(
+            "<LoadBalancerArn>arn:aws:elasticloadbalancing:us-east-1:987654321098:\
+             loadbalancer/app/my-alb/50dc6c495c0c9188</LoadBalancerArn>",
+        );
+        assert!(!out.contains("987654321098"), "account id survived: {out}");
+        assert!(
+            !out.contains("50dc6c495c0c9188"),
+            "arn tail survived: {out}"
+        );
+        // The load balancer's *name* is meaningful to the diff (or will be,
+        // once behavioral tracking exists) and must survive, same as a
+        // security group's name.
+        assert!(out.contains("loadbalancer/app/my-alb/"), "got: {out}");
     }
 
     #[test]

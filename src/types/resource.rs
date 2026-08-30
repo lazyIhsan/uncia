@@ -22,6 +22,7 @@ pub struct ResourceId(pub String);
 pub enum ResourceKind {
     AwsSecurityGroup,
     AwsInstance,
+    AwsLoadBalancer,
     /// A rule declared as its own resource rather than inline on the group.
     ///
     /// These are never compared against live observations — no collector
@@ -40,6 +41,9 @@ impl ResourceKind {
         match terraform_type {
             "aws_security_group" => Self::AwsSecurityGroup,
             "aws_instance" => Self::AwsInstance,
+            // "aws_alb" is a deprecated alias for "aws_lb" — identical schema,
+            // still seen in older state.
+            "aws_lb" | "aws_alb" => Self::AwsLoadBalancer,
             "aws_security_group_rule" => Self::AwsSecurityGroupRule,
             "aws_vpc_security_group_ingress_rule" => Self::AwsVpcSecurityGroupIngressRule,
             "aws_vpc_security_group_egress_rule" => Self::AwsVpcSecurityGroupEgressRule,
@@ -52,6 +56,7 @@ impl ResourceKind {
         match self {
             Self::AwsSecurityGroup => "aws_security_group",
             Self::AwsInstance => "aws_instance",
+            Self::AwsLoadBalancer => "aws_lb",
             Self::AwsSecurityGroupRule => "aws_security_group_rule",
             Self::AwsVpcSecurityGroupIngressRule => "aws_vpc_security_group_ingress_rule",
             Self::AwsVpcSecurityGroupEgressRule => "aws_vpc_security_group_egress_rule",

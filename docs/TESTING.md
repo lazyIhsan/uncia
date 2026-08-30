@@ -51,14 +51,15 @@ worked example end to end.
 |---|---|---|
 | `tests/recordings/aws-two-resources.json` | ✅ **captured** from a real account (us-east-1) | security groups (self-referencing rule), empty-account instances |
 | `tests/recordings/aws-sg-membership.json` | ✅ **captured** from a real account (us-east-1) | a security group trusting a *different* group, a populated `DescribeInstances`, and the `sg_membership` semantic-drift worked example |
+| `tests/recordings/aws-lb-membership-seed.json` | ⚠️ **seed** — hand-written | a populated `DescribeLoadBalancers` (an ALB with security groups, an NLB with none) |
 
-Both recordings are ground truth — there is no hand-written seed data left in
-the replay suite. (There was, briefly: a `DescribeInstances` guess written
-from the documented wire format, because the first captured account had no
-running instances. It's gone now that `aws-sg-membership.json` grounds the
-instance collector for real. Same discipline as `tests/state_equivalence.rs`,
-whose fixtures come from a real `terraform apply` rather than from what we
-believed Terraform emits.)
+The first two recordings are ground truth. The third is not yet: grounding it
+needs an account with a real ALB or NLB provisioned, which
+`aws-sg-membership.json`'s account didn't have at the time. Same discipline as
+the (now-retired) instance seed — `examples/capture_recording.rs` already
+captures `DescribeLoadBalancers`, so whenever a load balancer exists in a
+capturable account, re-running the capture tool grounds this the same way
+`aws-sg-membership.json` grounded the instance seed.
 
 #### What the captured recordings already proved
 

@@ -7,7 +7,7 @@
 //! no unit test would notice. Here the bytes go through the same
 //! deserialization path a live call uses.
 //!
-//! **Two recordings, both captured from real accounts:**
+//! **Two recordings captured from real accounts, one still a seed:**
 //!
 //! - `aws-two-resources.json` — one security group, an empty account (no EC2
 //!   instances).
@@ -16,6 +16,9 @@
 //!   proved), and two real running instances, both members of the trusted
 //!   group. This also grounds the `sg_membership` semantic-drift worked
 //!   example end to end — see `docs/SEMANTIC-DRIFT.md`.
+//! - `aws-lb-membership-seed.json` — hand-written, not yet captured from a
+//!   real account with an ALB/NLB provisioned; `seed_`-prefixed tests assert
+//!   against it.
 //!
 //! See `docs/TESTING.md` for the capture workflow and current status.
 
@@ -26,7 +29,7 @@ use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
 use serde::Deserialize;
 
-use uncia::collector::aws::{ec2, security_group};
+use uncia::collector::aws::{ec2, load_balancer, security_group};
 use uncia::types::drift::DriftKind;
 use uncia::{LiveResource, ResourceKind};
 
@@ -42,12 +45,14 @@ struct RecordedResponse {
     body: String,
 }
 
-/// Build an EC2 client that replays the named recording instead of calling AWS.
+/// Select every recorded response belonging to the requested operations,
+/// preserving file order, and shape each into a replay event against `uri`.
 ///
-/// Selects every response belonging to the requested operations, preserving
-/// file order — a paginated capture contributes several responses under one
-/// operation name and must replay them all, in sequence.
-fn replay_client(recording: &Recording, operations: &[&str]) -> aws_sdk_ec2::Client {
+/// A paginated capture contributes several responses under one operation
+/// name and must replay them all, in sequence. Shared between services —
+/// only the client `Config` type differs, since each generated SDK crate has
+/// its own.
+fn replay_events(recording: &Recording, operations: &[&str], uri: &str) -> Vec<ReplayEvent> {
     let mut by_operation: HashMap<&str, Vec<&RecordedResponse>> = HashMap::new();
     for response in &recording.responses {
         by_operation
@@ -56,7 +61,7 @@ fn replay_client(recording: &Recording, operations: &[&str]) -> aws_sdk_ec2::Cli
             .push(response);
     }
 
-    let events: Vec<ReplayEvent> = operations
+    operations
         .iter()
         .flat_map(|op| {
             by_operation
@@ -68,7 +73,7 @@ fn replay_client(recording: &Recording, operations: &[&str]) -> aws_sdk_ec2::Cli
             ReplayEvent::new(
                 http::Request::builder()
                     .method("POST")
-                    .uri("https://ec2.us-east-1.amazonaws.com/")
+                    .uri(uri)
                     .body(SdkBody::empty())
                     .unwrap(),
                 http::Response::builder()
@@ -77,8 +82,16 @@ fn replay_client(recording: &Recording, operations: &[&str]) -> aws_sdk_ec2::Cli
                     .unwrap(),
             )
         })
-        .collect();
+        .collect()
+}
 
+/// Build an EC2 client that replays the named recording instead of calling AWS.
+fn replay_client(recording: &Recording, operations: &[&str]) -> aws_sdk_ec2::Client {
+    let events = replay_events(
+        recording,
+        operations,
+        "https://ec2.us-east-1.amazonaws.com/",
+    );
     let config = aws_sdk_ec2::Config::builder()
         .http_client(StaticReplayClient::new(events))
         .region(Region::new("us-east-1"))
@@ -86,6 +99,25 @@ fn replay_client(recording: &Recording, operations: &[&str]) -> aws_sdk_ec2::Cli
         .behavior_version(BehaviorVersion::latest())
         .build();
     aws_sdk_ec2::Client::from_conf(config)
+}
+
+/// Build an ELBv2 client that replays the named recording instead of calling AWS.
+fn replay_elbv2_client(
+    recording: &Recording,
+    operations: &[&str],
+) -> aws_sdk_elasticloadbalancingv2::Client {
+    let events = replay_events(
+        recording,
+        operations,
+        "https://elasticloadbalancing.us-east-1.amazonaws.com/",
+    );
+    let config = aws_sdk_elasticloadbalancingv2::Config::builder()
+        .http_client(StaticReplayClient::new(events))
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new("replay", "replay", None, None, "replay"))
+        .behavior_version(BehaviorVersion::latest())
+        .build();
+    aws_sdk_elasticloadbalancingv2::Client::from_conf(config)
 }
 
 /// Captured from a real AWS account — ground truth.
@@ -97,6 +129,12 @@ fn captured() -> Recording {
 /// plus two real running instances.
 fn sg_membership() -> Recording {
     serde_json::from_str(include_str!("recordings/aws-sg-membership.json")).unwrap()
+}
+
+/// Hand-written `DescribeLoadBalancers` response — a guess, not ground truth.
+/// See `docs/TESTING.md`.
+fn lb_membership_seed() -> Recording {
+    serde_json::from_str(include_str!("recordings/aws-lb-membership-seed.json")).unwrap()
 }
 
 async fn collect_captured() -> Vec<LiveResource> {
@@ -328,4 +366,43 @@ async fn captured_undeclared_instance_joining_a_trusted_group_is_semantic_drift(
     };
     assert_eq!(field, "ingress");
     assert_eq!(relation, "sg_membership");
+}
+
+// --- Seed data: hand-written, NOT ground truth ---
+//
+// Carries the `seed_` prefix so a reader can tell at a glance it asserts
+// against invented bytes — same discipline `docs/TESTING.md` established for
+// the (now-retired) instance seed. Exercises the deserialization path and
+// locks a regression baseline, but a disagreement between this and real AWS
+// would mean the seed is wrong, not the collector. Replace by running
+// `cargo run --example capture_recording` against an account with a real
+// ALB/NLB provisioned.
+
+#[tokio::test]
+async fn seed_load_balancer_survives_the_wire() {
+    let rec = lb_membership_seed();
+    let live = load_balancer::fetch(&replay_elbv2_client(&rec, &["DescribeLoadBalancers"]))
+        .await
+        .unwrap();
+
+    assert_eq!(live.len(), 2);
+
+    let alb = live
+        .iter()
+        .find(|lb| lb.cloud_id.contains("uncia-seed-alb"))
+        .expect("ALB present");
+    assert_eq!(alb.kind, ResourceKind::AwsLoadBalancer);
+    assert_eq!(alb.attributes["id"], alb.cloud_id.as_str());
+    assert_eq!(
+        alb.attributes["security_groups"],
+        serde_json::json!(["sg-00000000000000001"])
+    );
+
+    // The NLB in the same account carries none — the common real-world shape,
+    // confirmed to deserialize as an empty list rather than erroring.
+    let nlb = live
+        .iter()
+        .find(|lb| lb.cloud_id.contains("uncia-seed-nlb"))
+        .expect("NLB present");
+    assert_eq!(nlb.attributes["security_groups"], serde_json::json!([]));
 }
