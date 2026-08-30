@@ -27,28 +27,54 @@ enum Command {
         #[arg(long)]
         state: String,
     },
+    /// Check declared state, then browse the report interactively.
+    Tui {
+        /// Path to `terraform show -json` output (`-` for stdin).
+        #[arg(long)]
+        state: String,
+    },
 }
 
 /// Exit codes follow `terraform plan -detailed-exitcode` conventions:
-/// 0 = no drift, 1 = error, 2 = drift found.
+/// 0 = no drift, 1 = error, 2 = drift found. `tui` always exits 0 on a clean
+/// quit — it's for a human at a keyboard, not a CI gate, so it doesn't
+/// encode drift presence in its exit code the way `check` does.
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let Command::Check { state } = cli.command;
 
-    match check(state).await {
-        Ok(report) => {
-            print_report(&report);
-            if report.drifts.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(2)
+    match cli.command {
+        Command::Check { state } => match check(state).await {
+            Ok(report) => {
+                print_report(&report);
+                if report.drifts.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(2)
+                }
             }
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(1)
-        }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Command::Tui { state } => match check(state.clone()).await {
+            // `tui::run` is a blocking, synchronous event loop (crossterm's
+            // event::read() blocks the calling thread). Nothing else is
+            // running concurrently by this point, so calling it directly
+            // from the async main is simplest — no spawn_blocking needed.
+            Ok(report) => match uncia::tui::run(state, report) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
+            },
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        },
     }
 }
 
