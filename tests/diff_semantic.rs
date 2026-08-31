@@ -13,7 +13,9 @@
 use serde_json::{Map, Value, json};
 
 use uncia::diff::compare;
-use uncia::{DriftKind, LiveResource, Resource, ResourceId, ResourceKind, Severity};
+use uncia::{
+    Drift, DriftKind, DriftReport, LiveResource, Resource, ResourceId, ResourceKind, Severity,
+};
 
 fn attrs(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
@@ -123,6 +125,33 @@ fn declared_lb(address: &str, arn: &str, sgs: &[&str]) -> Resource {
         address,
         ResourceKind::AwsLoadBalancer,
         json!({"id": arn, "security_groups": sgs}),
+    )
+}
+
+/// A declared `aws_lb_target_group`. No `targets` here — Terraform has no
+/// such inline argument; registration is `declared_attachment` below,
+/// reconciled in by `diff::target_attachments::TargetAttachments`.
+fn declared_tg(address: &str, arn: &str, lb_arn: &str) -> Resource {
+    declared(
+        address,
+        ResourceKind::AwsLbTargetGroup,
+        json!({"id": arn, "load_balancer_arns": [lb_arn]}),
+    )
+}
+
+fn live_tg(arn: &str, lb_arn: &str, targets: &[&str]) -> LiveResource {
+    live(
+        arn,
+        ResourceKind::AwsLbTargetGroup,
+        json!({"id": arn, "load_balancer_arns": [lb_arn], "targets": targets}),
+    )
+}
+
+fn declared_attachment(address: &str, target_group_arn: &str, target_id: &str) -> Resource {
+    declared(
+        address,
+        ResourceKind::AwsLbTargetGroupAttachment,
+        json!({"target_group_arn": target_group_arn, "target_id": target_id}),
     )
 }
 
@@ -779,4 +808,203 @@ fn matching_load_balancer_membership_is_not_drift() {
     let report = compare(&declared, &live);
     assert!(report.drifts.is_empty(), "{:?}", report.drifts);
     assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+}
+
+// --- internet_reachability ---
+
+fn reachability_drift(report: &DriftReport) -> Option<&Drift> {
+    report.drifts.iter().find(
+        |d| matches!(&d.kind, DriftKind::SemanticChanged { relation, .. } if relation == "internet_reachability"),
+    )
+}
+
+#[test]
+fn a_declared_target_group_attachment_matching_live_registration_is_not_drift() {
+    // The steady state this whole phase exists to make possible: a target
+    // group's registration is declared via `aws_lb_target_group_attachment`
+    // and matches what's live. Before Phase 3's declared-side reconciliation,
+    // the declared side could never represent `targets` at all, so this
+    // would have false-positived on every run regardless of this test.
+    let alb_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-alb/1";
+    let tg_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/my-targets/1";
+    let declared = [
+        declared_sg_open("aws_security_group.web", "sg-web", &[443]),
+        declared_lb("aws_lb.app", alb_arn, &["sg-web"]),
+        declared_tg("aws_lb_target_group.app", tg_arn, alb_arn),
+        declared_attachment("aws_lb_target_group_attachment.app", tg_arn, "i-app"),
+        declared_instance("aws_instance.app", "i-app", &[]),
+    ];
+    let live = [
+        live_sg_open("sg-web", &[443]),
+        live_lb(alb_arn, &["sg-web"]),
+        live_tg(tg_arn, alb_arn, &["i-app"]),
+        live_instance("i-app", &[]),
+    ];
+
+    let report = compare(&declared, &live);
+    assert!(reachability_drift(&report).is_none(), "{:?}", report.drifts);
+}
+
+#[test]
+fn a_target_registered_live_but_never_declared_is_high_severity_drift() {
+    // The scenario Phase 3 exists to catch: an instance registered to an
+    // ALB's target group outside Terraform. Every field on every declared
+    // resource is byte-identical (there's simply no attachment resource at
+    // all), so only the semantic pass can see it.
+    let alb_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-alb/1";
+    let tg_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/my-targets/1";
+    let declared = [
+        declared_sg_open("aws_security_group.web", "sg-web", &[443]),
+        declared_lb("aws_lb.app", alb_arn, &["sg-web"]),
+        declared_tg("aws_lb_target_group.app", tg_arn, alb_arn),
+        // No attachment resource declared.
+        declared_instance("aws_instance.app", "i-app", &[]),
+    ];
+    let live = [
+        live_sg_open("sg-web", &[443]),
+        live_lb(alb_arn, &["sg-web"]),
+        live_tg(tg_arn, alb_arn, &["i-app"]),
+        live_instance("i-app", &[]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    let drift = reachability_drift(&report).unwrap_or_else(|| {
+        panic!(
+            "expected an internet_reachability finding: {:?}",
+            report.drifts
+        )
+    });
+    assert_eq!(drift.resource.0, "aws_instance.app");
+    assert_eq!(
+        drift.severity,
+        Severity::High,
+        "reachability grew: the instance is now reachable from the internet"
+    );
+
+    let DriftKind::SemanticChanged {
+        field,
+        declared_effective,
+        actual_effective,
+        via,
+        ..
+    } = &drift.kind
+    else {
+        panic!("expected SemanticChanged, got {:?}", drift.kind);
+    };
+    assert_eq!(field, "vpc_security_group_ids");
+    assert_eq!(declared_effective, &json!([]));
+    assert_eq!(
+        actual_effective,
+        &json!([format!("via:sg-web>{alb_arn}>{tg_arn}>i-app")])
+    );
+    assert!(via.contains(&"sg-web".to_string()), "{via:?}");
+    assert!(via.contains(&"i-app".to_string()), "{via:?}");
+}
+
+#[test]
+fn a_declared_attachment_no_longer_registered_live_is_low_severity_drift() {
+    // The mirror image: declared via Terraform, deregistered outside it.
+    // Still drift, still worth reporting, but the shrinking direction.
+    let alb_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-alb/1";
+    let tg_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/my-targets/1";
+    let declared = [
+        declared_sg_open("aws_security_group.web", "sg-web", &[443]),
+        declared_lb("aws_lb.app", alb_arn, &["sg-web"]),
+        declared_tg("aws_lb_target_group.app", tg_arn, alb_arn),
+        declared_attachment("aws_lb_target_group_attachment.app", tg_arn, "i-app"),
+        declared_instance("aws_instance.app", "i-app", &[]),
+    ];
+    let live = [
+        live_sg_open("sg-web", &[443]),
+        live_lb(alb_arn, &["sg-web"]),
+        live_tg(tg_arn, alb_arn, &[]),
+        live_instance("i-app", &[]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    let drift = reachability_drift(&report).unwrap_or_else(|| {
+        panic!(
+            "expected an internet_reachability finding: {:?}",
+            report.drifts
+        )
+    });
+    assert_eq!(drift.severity, Severity::Low);
+}
+
+#[test]
+fn reachability_through_a_pure_security_group_trust_chain_needs_no_load_balancer() {
+    // No load balancer or target group anywhere in this graph: `i-web` picks
+    // up `sg-app` outside Terraform, and `sg-db` (declared to trust sg-app
+    // already) now admits it — so `i-db`, two hops from the internet-facing
+    // group and untouched itself, becomes reachable. Confirms the ALB-
+    // specific reconciliation this phase added didn't couple to the
+    // trust-hop path the engine already proved in Phase 2.
+    let declared = [
+        declared_sg_open("aws_security_group.web", "sg-web", &[443]),
+        declared_sg("aws_security_group.app", "sg-app", &[]),
+        declared_sg("aws_security_group.db", "sg-db", &["sg-app"]),
+        declared_instance("aws_instance.web", "i-web", &["sg-web"]),
+        declared_instance("aws_instance.db", "i-db", &["sg-db"]),
+    ];
+    let live = [
+        live_sg_open("sg-web", &[443]),
+        live_sg("sg-app", &[]),
+        live_sg("sg-db", &["sg-app"]),
+        // Attached to sg-app in the console; nothing declared changed.
+        live_instance("i-web", &["sg-web", "sg-app"]),
+        live_instance("i-db", &["sg-db"]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    // The cause: i-web's own field really did change.
+    assert!(
+        report.drifts.iter().any(|d| {
+            d.resource.0 == "aws_instance.web"
+                && matches!(&d.kind, DriftKind::FieldChanged { field, .. } if field == "vpc_security_group_ids")
+        }),
+        "the cause: {:?}",
+        report.drifts
+    );
+    // The consequence: i-db, untouched itself, is now reachable.
+    let drift = reachability_drift(&report)
+        .unwrap_or_else(|| panic!("the consequence: {:?}", report.drifts));
+    assert_eq!(drift.resource.0, "aws_instance.db");
+    assert_eq!(drift.severity, Severity::High);
+}
+
+#[test]
+fn a_state_file_declaring_no_security_groups_reports_no_reachability_drift() {
+    // The load-bearing guard, mirrored a third time: a state file that
+    // declares instances but no security groups is not an authority on
+    // whether the internet can reach them.
+    let declared = [declared_instance("aws_instance.app", "i-app", &[])];
+    let live = [
+        live_sg_open("sg-app", &[443]),
+        live_instance("i-app", &["sg-app"]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    assert!(
+        reachability_drift(&report).is_none(),
+        "must not fabricate drift from a non-authoritative state file: {:?}",
+        report.drifts
+    );
+    let unresolved = report
+        .unresolved
+        .iter()
+        .find(|u| u.relation == "internet_reachability")
+        .expect("expected an unresolved internet_reachability entry");
+    assert!(
+        unresolved.resource.is_none(),
+        "the state file is not authoritative, not any one resource"
+    );
+    assert!(
+        unresolved.reason.contains("aws_security_group"),
+        "{}",
+        unresolved.reason
+    );
 }
