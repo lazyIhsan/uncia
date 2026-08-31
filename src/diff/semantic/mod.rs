@@ -25,6 +25,7 @@ use serde_json::{Map, Value};
 
 use crate::collector::LiveResource;
 use crate::diff::rules::SiblingRules;
+use crate::diff::target_attachments::TargetAttachments;
 use crate::types::drift::{Drift, DriftKind, DriftReport, Severity, Unresolved};
 use crate::types::resource::{Resource, ResourceKind};
 use graph::{Graph, Node};
@@ -51,11 +52,17 @@ pub trait Relation {
 
     /// The cloud IDs a subject's stored value points at, reported on every
     /// finding as `via` — the path that makes a semantic claim checkable
-    /// against the account without reading this source. Must never be empty
-    /// for a subject [`expand`](Relation::expand) resolved successfully; a
-    /// relation whose findings would have no path to report should fail
-    /// resolution in `expand` instead.
-    fn via(&self, subject: &Node) -> Vec<String>;
+    /// against the account without reading this source. `compare` calls this
+    /// once per side and unions the results, since a relation's path can
+    /// exist on only one side (a chain that's new live, or one that
+    /// disappeared) — unlike `SgMembership`/`InstanceExposure`, whose `via`
+    /// happens to read identically off either side, `graph` is here so a
+    /// relation whose path only exists on one side can still compute it. The
+    /// union must never be empty for a subject
+    /// [`expand`](Relation::expand) resolved successfully; a relation whose
+    /// findings would have no path to report should fail resolution in
+    /// `expand` instead.
+    fn via(&self, subject: &Node, graph: &Graph) -> Vec<String>;
 }
 
 /// Every relation shipped in the open catalog.
@@ -63,6 +70,7 @@ fn catalog() -> Vec<Box<dyn Relation>> {
     vec![
         Box::new(relations::SgMembership),
         Box::new(relations::InstanceExposure),
+        Box::new(relations::InternetReachability),
     ]
 }
 
@@ -79,9 +87,16 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
     // behavioral pass's reconciliation would have merely moved the false
     // positive rather than removed it.
     let siblings = SiblingRules::index(declared);
+    let attachments = TargetAttachments::index(declared);
     let effective: Vec<(&ResourceKind, &str, Map<String, Value>)> = declared
         .iter()
-        .filter_map(|r| Some((&r.kind, r.cloud_id()?, effective_attributes(r, &siblings))))
+        .filter_map(|r| {
+            Some((
+                &r.kind,
+                r.cloud_id()?,
+                effective_attributes(r, &siblings, &attachments),
+            ))
+        })
         .collect();
     let declared_graph = graph::build(effective.iter().map(|(k, id, a)| (*k, *id, a)));
     let live_graph = graph::build(
@@ -154,7 +169,10 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
                 continue;
             }
 
-            let via = relation.via(declared_node);
+            let mut via = relation.via(declared_node, &declared_graph);
+            via.extend(relation.via(live_node, &live_graph));
+            via.sort();
+            via.dedup();
             if via.is_empty() {
                 // A finding whose path cannot be stated is unfalsifiable, and
                 // users mute unfalsifiable claims. Refuse to emit one.
@@ -177,29 +195,50 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
     }
 }
 
-/// A declared resource's attributes with its separately-declared rules folded
-/// into the rule lists, so relations see what the group effectively allows.
-fn effective_attributes(resource: &Resource, siblings: &SiblingRules) -> Map<String, Value> {
+/// A declared resource's attributes with its separately-declared rules or
+/// target registrations folded in, so relations see what the resource
+/// effectively allows or contains.
+fn effective_attributes(
+    resource: &Resource,
+    siblings: &SiblingRules,
+    attachments: &TargetAttachments,
+) -> Map<String, Value> {
     let mut attributes = resource.attributes.clone();
-    if resource.kind != ResourceKind::AwsSecurityGroup {
-        return attributes;
-    }
     let Some(cloud_id) = resource.cloud_id() else {
         return attributes;
     };
-    for direction in ["ingress", "egress"] {
-        let extra = siblings.blocks(cloud_id, direction);
-        if extra.is_empty() {
-            continue;
+
+    match resource.kind {
+        ResourceKind::AwsSecurityGroup => {
+            for direction in ["ingress", "egress"] {
+                let extra = siblings.blocks(cloud_id, direction);
+                if extra.is_empty() {
+                    continue;
+                }
+                let mut rules = attributes
+                    .get(direction)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                rules.extend(extra);
+                attributes.insert(direction.to_string(), Value::Array(rules));
+            }
         }
-        let mut rules = attributes
-            .get(direction)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        rules.extend(extra);
-        attributes.insert(direction.to_string(), Value::Array(rules));
+        ResourceKind::AwsLbTargetGroup => {
+            attributes.insert(
+                "targets".to_string(),
+                Value::Array(
+                    attachments
+                        .targets(cloud_id)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        _ => {}
     }
+
     attributes
 }
 

@@ -33,6 +33,16 @@ pub enum ResourceKind {
     AwsSecurityGroupRule,
     AwsVpcSecurityGroupIngressRule,
     AwsVpcSecurityGroupEgressRule,
+    /// A target-group registration declared as its own resource rather than
+    /// an inline argument on the target group.
+    ///
+    /// Same treatment as [`ResourceKind::AwsSecurityGroupRule`]: never
+    /// compared against live observations — no collector returns them,
+    /// because AWS reports a target group's registrations on the group. Read
+    /// only as *declared intent*, and reconciled into the owning target
+    /// group's `targets` before comparison. See
+    /// `crate::diff::target_attachments`.
+    AwsLbTargetGroupAttachment,
     Other(String),
 }
 
@@ -49,6 +59,7 @@ impl ResourceKind {
             "aws_security_group_rule" => Self::AwsSecurityGroupRule,
             "aws_vpc_security_group_ingress_rule" => Self::AwsVpcSecurityGroupIngressRule,
             "aws_vpc_security_group_egress_rule" => Self::AwsVpcSecurityGroupEgressRule,
+            "aws_lb_target_group_attachment" => Self::AwsLbTargetGroupAttachment,
             other => Self::Other(other.to_string()),
         }
     }
@@ -63,6 +74,7 @@ impl ResourceKind {
             Self::AwsSecurityGroupRule => "aws_security_group_rule",
             Self::AwsVpcSecurityGroupIngressRule => "aws_vpc_security_group_ingress_rule",
             Self::AwsVpcSecurityGroupEgressRule => "aws_vpc_security_group_egress_rule",
+            Self::AwsLbTargetGroupAttachment => "aws_lb_target_group_attachment",
             Self::Other(s) => s,
         }
     }

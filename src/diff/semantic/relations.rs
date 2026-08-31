@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::Relation;
 use super::graph::{Graph, Node};
+use super::reachability;
 use crate::diff::rules::{explode_rules, rule_base};
 use crate::types::resource::ResourceKind;
 
@@ -114,7 +115,7 @@ impl Relation for SgMembership {
         Ok(Value::Array(atoms.into_iter().map(Value::String).collect()))
     }
 
-    fn via(&self, subject: &Node) -> Vec<String> {
+    fn via(&self, subject: &Node, _graph: &Graph) -> Vec<String> {
         referenced_groups(subject)
     }
 }
@@ -204,7 +205,7 @@ impl Relation for InstanceExposure {
         Ok(Value::Array(atoms.into_iter().map(Value::String).collect()))
     }
 
-    fn via(&self, subject: &Node) -> Vec<String> {
+    fn via(&self, subject: &Node, _graph: &Graph) -> Vec<String> {
         let mut ids: Vec<String> = subject
             .attributes
             .get("vpc_security_group_ids")
@@ -217,6 +218,99 @@ impl Relation for InstanceExposure {
         ids.sort();
         ids.dedup();
         ids
+    }
+}
+
+/// How many hops [`InternetReachability`] will follow before giving up.
+/// Chosen generously past the 6-hop three-tier chain `reachability`'s own
+/// tests exercise (entry group -> ALB -> target group -> app instance ->
+/// trusted group -> db instance) — a cutoff for a bounded walk, not a claim
+/// about what depth is "normal."
+const MAX_HOPS: usize = 12;
+
+/// Internet reachability: whether the public internet can reach a declared
+/// instance at all, however many security-group, load-balancer, or trust
+/// hops away.
+///
+/// The transitive generalization of [`InstanceExposure`]: that relation
+/// reads only the rules on an instance's *directly* attached groups, so a
+/// group's rule trusting another group (`security_groups: [sg-app]`) reads
+/// as an opaque `sg:sg-app` atom — it says nothing about whether `sg-app`
+/// itself traces back to the internet. This relation answers that question
+/// by walking [`reachability::reachable_from`] from every internet-facing
+/// group and checking whether the subject instance is among what's found.
+pub struct InternetReachability;
+
+impl InternetReachability {
+    /// Every distinct chain (entry group, then each hop, ending at the
+    /// subject) from an internet-facing group to `subject` in `graph`.
+    fn chains(subject: &Node, graph: &Graph) -> Vec<Vec<String>> {
+        let mut chains = Vec::new();
+        for entry in reachability::internet_facing_groups(graph) {
+            let reached = reachability::reachable_from(
+                graph,
+                &ResourceKind::AwsSecurityGroup,
+                &entry,
+                MAX_HOPS,
+            );
+            for r in reached {
+                if r.kind != ResourceKind::AwsInstance || r.cloud_id != subject.cloud_id {
+                    continue;
+                }
+                let mut chain = vec![entry.clone()];
+                chain.extend(r.path.iter().cloned());
+                chains.push(chain);
+            }
+        }
+        chains
+    }
+}
+
+impl Relation for InternetReachability {
+    fn name(&self) -> &str {
+        "internet_reachability"
+    }
+
+    fn requires(&self) -> &[ResourceKind] {
+        // Same reasoning as InstanceExposure: reachability is derived from
+        // what groups allow, so a state file declaring none isn't
+        // authoritative. Deliberately does not also require
+        // AwsLoadBalancer or AwsLbTargetGroupAttachment, for the same
+        // "network/compute split across state files" reason SgMembership
+        // documents for AwsLoadBalancer — narrower than it looks, known,
+        // and accepted rather than solved with more required kinds.
+        &[ResourceKind::AwsSecurityGroup]
+    }
+
+    fn subject(&self) -> (ResourceKind, &str) {
+        // The same field InstanceExposure expands — this relation
+        // reinterprets it transitively (through membership, registration,
+        // and trust) rather than reading only the attached groups' own
+        // rules.
+        (ResourceKind::AwsInstance, "vpc_security_group_ids")
+    }
+
+    /// One atom per distinct chain, not just per entry/target pair: a
+    /// topology change (a different intermediate hop) is meaningful even
+    /// when "reachable: yes" doesn't change, the same philosophy
+    /// `SgMembership`'s atoms already follow. An instance no chain reaches
+    /// expands to an empty set, not an error — unlike a dangling group
+    /// reference, "not currently reachable" is a legitimate, resolvable
+    /// state.
+    fn expand(&self, subject: &Node, graph: &Graph) -> Result<Value, String> {
+        let atoms: BTreeSet<String> = Self::chains(subject, graph)
+            .into_iter()
+            .map(|chain| format!("via:{}", chain.join(">")))
+            .collect();
+        Ok(Value::Array(atoms.into_iter().map(Value::String).collect()))
+    }
+
+    fn via(&self, subject: &Node, graph: &Graph) -> Vec<String> {
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        for chain in Self::chains(subject, graph) {
+            ids.extend(chain);
+        }
+        ids.into_iter().collect()
     }
 }
 
@@ -564,9 +658,163 @@ mod tests {
     #[test]
     fn via_lists_the_groups_an_instance_is_attached_to() {
         let worker = instance_in(json!(["sg-app", "sg-db"]));
+        let g = graph::build(std::iter::empty());
         assert_eq!(
-            InstanceExposure.via(&instance_subject("i-worker", &worker)),
+            InstanceExposure.via(&instance_subject("i-worker", &worker), &g),
             vec!["sg-app", "sg-db"]
         );
+    }
+
+    // --- InternetReachability ---
+
+    fn tg_in(lb_arn: &str, targets: Value) -> Map<String, Value> {
+        attrs(json!({"load_balancer_arns": [lb_arn], "targets": targets}))
+    }
+
+    #[test]
+    fn an_instance_directly_in_an_internet_facing_group_is_reachable() {
+        let web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let worker = instance_in(json!(["sg-web"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+            ]
+            .into_iter(),
+        );
+
+        let effective = InternetReachability
+            .expand(&instance_subject("i-worker", &worker), &g)
+            .unwrap();
+        assert_eq!(effective, json!(["via:sg-web>i-worker"]));
+        assert_eq!(
+            InternetReachability.via(&instance_subject("i-worker", &worker), &g),
+            vec!["i-worker", "sg-web"]
+        );
+    }
+
+    #[test]
+    fn reaches_a_database_instance_through_a_web_and_app_tier() {
+        // internet -> sg-web (entry) -> alb (member) -> tg (registered)
+        // -> i-app (registered) -> sg-app (own group) -> sg-db (trusts
+        // sg-app) -> i-db (member) — the same chain reachability.rs's own
+        // flagship test proves the engine finds, now proven through the
+        // actual Relation a user's report reads.
+        let sg_web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let alb = lb_in(json!(["sg-web"]));
+        let tg = tg_in("arn:alb/1", json!(["i-app"]));
+        let app = instance_in(json!(["sg-app"]));
+        let sg_app = attrs(json!({"name": "app"}));
+        let sg_db = sg_trusting("sg-app");
+        let db = instance_in(json!(["sg-db"]));
+
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &sg_web),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+                (&ResourceKind::AwsLbTargetGroup, "arn:tg/1", &tg),
+                (&ResourceKind::AwsInstance, "i-app", &app),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &sg_app),
+                (&ResourceKind::AwsSecurityGroup, "sg-db", &sg_db),
+                (&ResourceKind::AwsInstance, "i-db", &db),
+            ]
+            .into_iter(),
+        );
+
+        let effective = InternetReachability
+            .expand(&instance_subject("i-db", &db), &g)
+            .unwrap();
+        assert_eq!(
+            effective,
+            json!(["via:sg-web>arn:alb/1>arn:tg/1>i-app>sg-db>i-db"])
+        );
+    }
+
+    #[test]
+    fn a_new_live_target_group_registration_widens_reachability() {
+        // Nothing about sg-web, the ALB, or i-app moves — only the live
+        // target group's registered targets change. This is the scenario
+        // Phase 3 exists to make provable: without declared-side
+        // reconciliation, the declared side would have no `targets` at
+        // all, so this would (wrongly) fire on every run instead of only
+        // this one.
+        let sg_web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let alb = lb_in(json!(["sg-web"]));
+        let app = instance_in(json!([]));
+
+        let declared_tg = tg_in("arn:alb/1", json!([]));
+        let declared = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &sg_web),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+                (&ResourceKind::AwsLbTargetGroup, "arn:tg/1", &declared_tg),
+                (&ResourceKind::AwsInstance, "i-app", &app),
+            ]
+            .into_iter(),
+        );
+
+        let live_tg = tg_in("arn:alb/1", json!(["i-app"]));
+        let live = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &sg_web),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+                (&ResourceKind::AwsLbTargetGroup, "arn:tg/1", &live_tg),
+                (&ResourceKind::AwsInstance, "i-app", &app),
+            ]
+            .into_iter(),
+        );
+
+        let before = InternetReachability
+            .expand(&instance_subject("i-app", &app), &declared)
+            .unwrap();
+        let after = InternetReachability
+            .expand(&instance_subject("i-app", &app), &live)
+            .unwrap();
+
+        assert_eq!(before, json!([]));
+        assert_eq!(after, json!(["via:sg-web>arn:alb/1>arn:tg/1>i-app"]));
+    }
+
+    #[test]
+    fn an_instance_with_no_path_from_the_internet_expands_to_nothing() {
+        let web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let isolated = attrs(json!({"name": "isolated"}));
+        let worker = instance_in(json!(["sg-isolated"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsSecurityGroup, "sg-isolated", &isolated),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+            ]
+            .into_iter(),
+        );
+
+        let effective = InternetReachability
+            .expand(&instance_subject("i-worker", &worker), &g)
+            .unwrap();
+        assert_eq!(effective, json!([]));
+        assert!(
+            InternetReachability
+                .via(&instance_subject("i-worker", &worker), &g)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_graph_with_no_internet_facing_group_reports_nothing_reachable() {
+        let private = sg_with_ingress(cidr_rule(443, 443, "10.0.0.0/8"));
+        let worker = instance_in(json!(["sg-private"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-private", &private),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+            ]
+            .into_iter(),
+        );
+
+        let effective = InternetReachability
+            .expand(&instance_subject("i-worker", &worker), &g)
+            .unwrap();
+        assert_eq!(effective, json!([]));
     }
 }

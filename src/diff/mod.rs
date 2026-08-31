@@ -14,6 +14,7 @@
 pub mod behavioral;
 pub(crate) mod rules;
 pub mod semantic;
+pub(crate) mod target_attachments;
 
 use crate::collector::LiveResource;
 use crate::types::drift::DriftReport;
