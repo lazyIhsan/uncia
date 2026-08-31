@@ -31,6 +31,7 @@ use crate::types::resource::ResourceKind;
 const EDGE_FIELDS: &[(ResourceKind, &str)] = &[
     (ResourceKind::AwsInstance, "vpc_security_group_ids"),
     (ResourceKind::AwsLoadBalancer, "security_groups"),
+    (ResourceKind::AwsLbTargetGroup, "load_balancer_arns"),
 ];
 
 /// One resource in the graph, as observed on whichever side built it.
@@ -77,6 +78,13 @@ impl Graph {
     /// not an authority on relations that depend on it.
     pub fn has_kind(&self, kind: &ResourceKind) -> bool {
         self.nodes.keys().any(|(k, _)| k == kind)
+    }
+
+    /// Every node of one kind, for callers that need to scan rather than look
+    /// up by id — e.g. `reachability`'s "which groups trust this one" search,
+    /// which has no id to look up by; it has to look at every security group.
+    pub fn nodes_of_kind<'a>(&'a self, kind: &'a ResourceKind) -> impl Iterator<Item = &'a Node> {
+        self.nodes.values().filter(move |n| &n.kind == kind)
     }
 }
 
