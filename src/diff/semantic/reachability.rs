@@ -106,7 +106,14 @@ fn neighbors(graph: &Graph, node: &Node) -> Vec<(ResourceKind, String)> {
             })
             .collect(),
 
-        ResourceKind::AwsInstance => own_groups(node, "vpc_security_group_ids")
+        // Identical logic for every member kind whose membership lives in a
+        // flat `vpc_security_group_ids` field — true of all of `MEMBER_KINDS`
+        // except `AwsLoadBalancer`, which uses a different field name and has
+        // an extra hop below.
+        ResourceKind::AwsInstance
+        | ResourceKind::AwsLambdaFunction
+        | ResourceKind::AwsDbInstance
+        | ResourceKind::AwsEcsService => own_groups(node, "vpc_security_group_ids")
             .flat_map(|group_id| groups_trusting(graph, &group_id))
             .map(|id| (ResourceKind::AwsSecurityGroup, id))
             .collect(),

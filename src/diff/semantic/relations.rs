@@ -13,12 +13,18 @@ use super::reachability;
 use crate::diff::rules::{explode_rules, rule_base};
 use crate::types::resource::ResourceKind;
 
-/// Members a rule referencing a security group can admit. An ALB's ENI
-/// carries whatever security groups the load balancer names, exactly like an
-/// EC2 instance carries `vpc_security_group_ids` — both are "who is in this
-/// group," just discovered through different edge fields.
-pub(crate) const MEMBER_KINDS: &[ResourceKind] =
-    &[ResourceKind::AwsInstance, ResourceKind::AwsLoadBalancer];
+/// Members a rule referencing a security group can admit. An ALB's ENI, a
+/// VPC-attached Lambda function, an RDS instance, and an `awsvpc`-mode ECS
+/// service all carry whatever security groups they name, exactly like an EC2
+/// instance carries `vpc_security_group_ids` — all of them are "who is in
+/// this group," just discovered through different edge fields.
+pub(crate) const MEMBER_KINDS: &[ResourceKind] = &[
+    ResourceKind::AwsInstance,
+    ResourceKind::AwsLoadBalancer,
+    ResourceKind::AwsLambdaFunction,
+    ResourceKind::AwsDbInstance,
+    ResourceKind::AwsEcsService,
+];
 
 /// Security-group membership: a rule that trusts another group effectively
 /// trusts whatever is *in* that group, and the group's own attributes say
@@ -55,8 +61,8 @@ impl Relation for SgMembership {
         &[ResourceKind::AwsInstance]
     }
 
-    fn subject(&self) -> (ResourceKind, &str) {
-        (ResourceKind::AwsSecurityGroup, "ingress")
+    fn subject(&self) -> &[(ResourceKind, &str)] {
+        &[(ResourceKind::AwsSecurityGroup, "ingress")]
     }
 
     /// Expand each group-sourced rule into one atom per member.
@@ -165,8 +171,8 @@ impl Relation for InstanceExposure {
         &[ResourceKind::AwsSecurityGroup]
     }
 
-    fn subject(&self) -> (ResourceKind, &str) {
-        (ResourceKind::AwsInstance, "vpc_security_group_ids")
+    fn subject(&self) -> &[(ResourceKind, &str)] {
+        &[(ResourceKind::AwsInstance, "vpc_security_group_ids")]
     }
 
     /// Union the ingress rules of every attached group into one atom set.
@@ -254,7 +260,7 @@ impl InternetReachability {
                 MAX_HOPS,
             );
             for r in reached {
-                if r.kind != ResourceKind::AwsInstance || r.cloud_id != subject.cloud_id {
+                if r.kind != subject.kind || r.cloud_id != subject.cloud_id {
                     continue;
                 }
                 let mut chain = vec![entry.clone()];
@@ -282,12 +288,22 @@ impl Relation for InternetReachability {
         &[ResourceKind::AwsSecurityGroup]
     }
 
-    fn subject(&self) -> (ResourceKind, &str) {
-        // The same field InstanceExposure expands — this relation
-        // reinterprets it transitively (through membership, registration,
-        // and trust) rather than reading only the attached groups' own
-        // rules.
-        (ResourceKind::AwsInstance, "vpc_security_group_ids")
+    fn subject(&self) -> &[(ResourceKind, &str)] {
+        // The same field InstanceExposure expands on AwsInstance — this
+        // relation reinterprets it transitively (through membership,
+        // registration, and trust) rather than reading only the attached
+        // groups' own rules — and asks the same question of every other
+        // kind that can carry a security group: "is this thing reachable
+        // from the internet at all," which is the same claim shape
+        // regardless of which kind answers yes. `chains()` reads
+        // `subject.kind` rather than assuming `AwsInstance`, so no other
+        // code needs to change as this list grows.
+        &[
+            (ResourceKind::AwsInstance, "vpc_security_group_ids"),
+            (ResourceKind::AwsDbInstance, "vpc_security_group_ids"),
+            (ResourceKind::AwsLambdaFunction, "vpc_security_group_ids"),
+            (ResourceKind::AwsEcsService, "vpc_security_group_ids"),
+        ]
     }
 
     /// One atom per distinct chain, not just per entry/target pair: a
@@ -816,5 +832,88 @@ mod tests {
             .expand(&instance_subject("i-worker", &worker), &g)
             .unwrap();
         assert_eq!(effective, json!([]));
+    }
+
+    // --- Lambda/RDS/ECS as members and as InternetReachability subjects ---
+
+    fn subject_of(kind: ResourceKind, cloud_id: &str, attributes: &Map<String, Value>) -> Node {
+        Node {
+            kind,
+            cloud_id: cloud_id.to_string(),
+            attributes: attributes.clone(),
+        }
+    }
+
+    #[test]
+    fn an_rds_instance_attached_to_the_trusted_group_is_a_member() {
+        // Same shape as the load-balancer case: a member kind other than
+        // AwsInstance, discovered through MEMBER_KINDS with no other code
+        // change.
+        let web = sg_trusting("sg-app");
+        let app = attrs(json!({"name": "app"}));
+        let db = instance_in(json!(["sg-app"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &app),
+                (&ResourceKind::AwsDbInstance, "db-ABCDEF", &db),
+            ]
+            .into_iter(),
+        );
+
+        let effective = SgMembership.expand(&subject(&web), &g).unwrap();
+        assert_eq!(effective, json!(["tcp/443-443/member:db-ABCDEF"]));
+    }
+
+    #[test]
+    fn a_database_instance_directly_in_an_internet_facing_group_is_reachable() {
+        // Proves AwsDbInstance as a real InternetReachability subject, not
+        // just a hop something else passes through.
+        let web = sg_with_ingress(cidr_rule(5432, 5432, "0.0.0.0/0"));
+        let db = instance_in(json!(["sg-web"]));
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsDbInstance, "db-ABCDEF", &db),
+            ]
+            .into_iter(),
+        );
+
+        let subject = subject_of(ResourceKind::AwsDbInstance, "db-ABCDEF", &db);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(effective, json!(["via:sg-web>db-ABCDEF"]));
+    }
+
+    #[test]
+    fn reaches_an_rds_instance_through_a_web_and_app_tier() {
+        // The flagship chain, terminating at a real AwsDbInstance instead of
+        // a plain AwsInstance standing in for "the database."
+        let sg_web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let alb = lb_in(json!(["sg-web"]));
+        let tg = tg_in("arn:alb/1", json!(["i-app"]));
+        let app = instance_in(json!(["sg-app"]));
+        let sg_app = attrs(json!({"name": "app"}));
+        let sg_db = sg_trusting("sg-app");
+        let db = instance_in(json!(["sg-db"]));
+
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &sg_web),
+                (&ResourceKind::AwsLoadBalancer, "arn:alb/1", &alb),
+                (&ResourceKind::AwsLbTargetGroup, "arn:tg/1", &tg),
+                (&ResourceKind::AwsInstance, "i-app", &app),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &sg_app),
+                (&ResourceKind::AwsSecurityGroup, "sg-db", &sg_db),
+                (&ResourceKind::AwsDbInstance, "db-ABCDEF", &db),
+            ]
+            .into_iter(),
+        );
+
+        let subject = subject_of(ResourceKind::AwsDbInstance, "db-ABCDEF", &db);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(
+            effective,
+            json!(["via:sg-web>arn:alb/1>arn:tg/1>i-app>sg-db>db-ABCDEF"])
+        );
     }
 }

@@ -155,6 +155,44 @@ fn declared_attachment(address: &str, target_group_arn: &str, target_id: &str) -
     )
 }
 
+/// A declared `aws_lambda_function`. `vpc_config` is a single nested block
+/// (`terraform show -json`'s shape for a one-element Terraform block), which
+/// `effective_attributes` flattens into a top-level `vpc_security_group_ids`
+/// before comparison — unlike `declared_rds`, which is already flat.
+fn declared_lambda(address: &str, name: &str, sgs: &[&str]) -> Resource {
+    declared(
+        address,
+        ResourceKind::AwsLambdaFunction,
+        json!({"id": name, "vpc_config": [{"security_group_ids": sgs, "subnet_ids": []}]}),
+    )
+}
+
+fn live_lambda(name: &str, sgs: &[&str]) -> LiveResource {
+    live(
+        name,
+        ResourceKind::AwsLambdaFunction,
+        json!({"id": name, "vpc_security_group_ids": sgs}),
+    )
+}
+
+/// `id` here stands in for `DbiResourceId` — the AWS-internal id Terraform
+/// actually uses as `aws_db_instance.id`, not the identifier or the ARN.
+fn declared_rds(address: &str, resource_id: &str, sgs: &[&str]) -> Resource {
+    declared(
+        address,
+        ResourceKind::AwsDbInstance,
+        json!({"id": resource_id, "vpc_security_group_ids": sgs}),
+    )
+}
+
+fn live_rds(resource_id: &str, sgs: &[&str]) -> LiveResource {
+    live(
+        resource_id,
+        ResourceKind::AwsDbInstance,
+        json!({"id": resource_id, "vpc_security_group_ids": sgs}),
+    )
+}
+
 /// The scenario the whole feature exists for, from `docs/ARCHITECTURE.md`:
 /// `web` trusts `sg-app` on 443, and someone attaches `sg-app` to an instance
 /// that is in no state file. Every field on every declared resource is
@@ -1007,4 +1045,71 @@ fn a_state_file_declaring_no_security_groups_reports_no_reachability_drift() {
         "{}",
         unresolved.reason
     );
+}
+
+// --- Lambda/RDS/ECS membership ---
+
+#[test]
+fn a_lambda_function_picking_up_membership_makes_an_rds_instance_reachable() {
+    // internet -> sg-web (entry) -> my-function (member of sg-web) ->
+    // my-function ALSO picks up sg-app outside Terraform (the only thing
+    // that moves) -> sg-db (already declared to trust sg-app) -> the
+    // database (member). The database's own vpc_security_group_ids never
+    // changes; a Lambda function two hops upstream gaining a membership is
+    // what makes it reachable.
+    //
+    // No behavioral finding exists for that Lambda change at all —
+    // `behavioral::fields_for` doesn't cover `AwsLambdaFunction` yet, by
+    // design this round — so this is the semantic pass catching a real,
+    // multi-hop consequence entirely on its own.
+    let db_id = "db-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let declared = [
+        declared_sg_open("aws_security_group.web", "sg-web", &[443]),
+        declared_lambda("aws_lambda_function.app", "my-function", &["sg-web"]),
+        declared_sg("aws_security_group.app", "sg-app", &[]),
+        declared_sg("aws_security_group.db", "sg-db", &["sg-app"]),
+        declared_rds("aws_db_instance.db", db_id, &["sg-db"]),
+    ];
+    let live = [
+        live_sg_open("sg-web", &[443]),
+        // Attached to sg-app in the console; nothing declared changed.
+        live_lambda("my-function", &["sg-web", "sg-app"]),
+        live_sg("sg-app", &[]),
+        live_sg("sg-db", &["sg-app"]),
+        live_rds(db_id, &["sg-db"]),
+    ];
+
+    let report = compare(&declared, &live);
+
+    let drift = reachability_drift(&report).unwrap_or_else(|| {
+        panic!(
+            "expected an internet_reachability finding: {:?}",
+            report.drifts
+        )
+    });
+    assert_eq!(drift.resource.0, "aws_db_instance.db");
+    assert_eq!(
+        drift.severity,
+        Severity::High,
+        "reachability grew: the database is now reachable from the internet"
+    );
+
+    let DriftKind::SemanticChanged {
+        field,
+        declared_effective,
+        actual_effective,
+        via,
+        ..
+    } = &drift.kind
+    else {
+        panic!("expected SemanticChanged, got {:?}", drift.kind);
+    };
+    assert_eq!(field, "vpc_security_group_ids");
+    assert_eq!(declared_effective, &json!([]));
+    assert_eq!(
+        actual_effective,
+        &json!([format!("via:sg-web>my-function>sg-db>{db_id}")])
+    );
+    assert!(via.contains(&"my-function".to_string()), "{via:?}");
+    assert!(via.contains(&db_id.to_string()), "{via:?}");
 }

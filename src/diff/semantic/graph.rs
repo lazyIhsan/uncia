@@ -32,6 +32,9 @@ const EDGE_FIELDS: &[(ResourceKind, &str)] = &[
     (ResourceKind::AwsInstance, "vpc_security_group_ids"),
     (ResourceKind::AwsLoadBalancer, "security_groups"),
     (ResourceKind::AwsLbTargetGroup, "load_balancer_arns"),
+    (ResourceKind::AwsLambdaFunction, "vpc_security_group_ids"),
+    (ResourceKind::AwsDbInstance, "vpc_security_group_ids"),
+    (ResourceKind::AwsEcsService, "vpc_security_group_ids"),
 ];
 
 /// One resource in the graph, as observed on whichever side built it.

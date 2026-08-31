@@ -39,8 +39,13 @@ pub trait Relation {
     /// Kinds the declared side must contain for this relation to be resolvable.
     fn requires(&self) -> &[ResourceKind];
 
-    /// The subject kind and the field whose meaning this relation expands.
-    fn subject(&self) -> (ResourceKind, &str);
+    /// The subject kinds and the field whose meaning this relation expands
+    /// on each. Usually one kind; a relation whose claim applies uniformly
+    /// across several kinds (e.g. "is this resource reachable from the
+    /// internet," which asks the same question of an instance, an RDS
+    /// instance, a Lambda function, or an ECS service) lists them all here
+    /// rather than needing a near-duplicate relation per kind.
+    fn subject(&self) -> &[(ResourceKind, &str)];
 
     /// Expand a subject's stored value into its effective meaning.
     ///
@@ -105,13 +110,13 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
     );
 
     for relation in catalog() {
-        let (subject_kind, field) = relation.subject();
-
         // Guard 2 — authority. A state file that declares none of a required
         // kind is not the authority on that relation: comparing a real live set
         // against a vacuous empty one would fire on every subject in the
         // account. Splitting network and compute into separate state files is a
-        // common enough layout that this is not hypothetical.
+        // common enough layout that this is not hypothetical. Relation-scoped,
+        // not per-subject-kind: `requires()` is a property of the relation as
+        // a whole.
         if let Some(missing) = relation
             .requires()
             .iter()
@@ -129,68 +134,73 @@ pub fn compare(declared: &[Resource], live: &[LiveResource], report: &mut DriftR
             continue;
         }
 
-        for resource in declared.iter().filter(|r| r.kind == subject_kind) {
-            // No cloud id, or absent live: the behavioral pass already recorded
-            // these as Unjoinable / Missing. Nothing semantic to add.
-            let Some(cloud_id) = resource.cloud_id() else {
-                continue;
-            };
-            let (Some(declared_node), Some(live_node)) = (
-                declared_graph.node(&subject_kind, cloud_id),
-                live_graph.node(&subject_kind, cloud_id),
-            ) else {
-                continue;
-            };
+        for (subject_kind, field) in relation.subject() {
+            let field = *field;
+            for resource in declared.iter().filter(|r| &r.kind == subject_kind) {
+                // No cloud id, or absent live: the behavioral pass already
+                // recorded these as Unjoinable / Missing. Nothing semantic to
+                // add.
+                let Some(cloud_id) = resource.cloud_id() else {
+                    continue;
+                };
+                let (Some(declared_node), Some(live_node)) = (
+                    declared_graph.node(subject_kind, cloud_id),
+                    live_graph.node(subject_kind, cloud_id),
+                ) else {
+                    continue;
+                };
 
-            // Guard 1 — disjointness. If the field itself drifted, behavioral
-            // owns it. This does not suppress a finding whose *cause* drifted
-            // elsewhere: the consequence is the point, and `via` links them.
-            if has_field_drift(report, &resource.id.0, field) {
-                continue;
-            }
-
-            let effective = (
-                relation.expand(declared_node, &declared_graph),
-                relation.expand(live_node, &live_graph),
-            );
-            let (declared_effective, actual_effective) = match effective {
-                (Ok(d), Ok(a)) => (d, a),
-                (Err(reason), _) | (_, Err(reason)) => {
-                    report.unresolved.push(Unresolved {
-                        resource: Some(resource.id.clone()),
-                        relation: relation.name().to_string(),
-                        reason,
-                    });
+                // Guard 1 — disjointness. If the field itself drifted,
+                // behavioral owns it. This does not suppress a finding whose
+                // *cause* drifted elsewhere: the consequence is the point, and
+                // `via` links them.
+                if has_field_drift(report, &resource.id.0, field) {
                     continue;
                 }
-            };
 
-            if declared_effective == actual_effective {
-                continue;
+                let effective = (
+                    relation.expand(declared_node, &declared_graph),
+                    relation.expand(live_node, &live_graph),
+                );
+                let (declared_effective, actual_effective) = match effective {
+                    (Ok(d), Ok(a)) => (d, a),
+                    (Err(reason), _) | (_, Err(reason)) => {
+                        report.unresolved.push(Unresolved {
+                            resource: Some(resource.id.clone()),
+                            relation: relation.name().to_string(),
+                            reason,
+                        });
+                        continue;
+                    }
+                };
+
+                if declared_effective == actual_effective {
+                    continue;
+                }
+
+                let mut via = relation.via(declared_node, &declared_graph);
+                via.extend(relation.via(live_node, &live_graph));
+                via.sort();
+                via.dedup();
+                if via.is_empty() {
+                    // A finding whose path cannot be stated is unfalsifiable,
+                    // and users mute unfalsifiable claims. Refuse to emit one.
+                    debug_assert!(false, "semantic finding with no via path");
+                    continue;
+                }
+
+                report.drifts.push(Drift {
+                    resource: resource.id.clone(),
+                    severity: severity_for(&declared_effective, &actual_effective),
+                    kind: DriftKind::SemanticChanged {
+                        field: field.to_string(),
+                        relation: relation.name().to_string(),
+                        declared_effective,
+                        actual_effective,
+                        via,
+                    },
+                });
             }
-
-            let mut via = relation.via(declared_node, &declared_graph);
-            via.extend(relation.via(live_node, &live_graph));
-            via.sort();
-            via.dedup();
-            if via.is_empty() {
-                // A finding whose path cannot be stated is unfalsifiable, and
-                // users mute unfalsifiable claims. Refuse to emit one.
-                debug_assert!(false, "semantic finding with no via path");
-                continue;
-            }
-
-            report.drifts.push(Drift {
-                resource: resource.id.clone(),
-                severity: severity_for(&declared_effective, &actual_effective),
-                kind: DriftKind::SemanticChanged {
-                    field: field.to_string(),
-                    relation: relation.name().to_string(),
-                    declared_effective,
-                    actual_effective,
-                    via,
-                },
-            });
         }
     }
 }
@@ -236,10 +246,45 @@ fn effective_attributes(
                 ),
             );
         }
+        // Both nest their security-group list one level inside a single
+        // block — `vpc_config { security_group_ids = [...] }`,
+        // `network_configuration { security_groups = [...] }` — which
+        // `terraform show -json` renders as a one-element array, the same
+        // shape as `metadata_options` on `aws_instance`. `EDGE_FIELDS` only
+        // reads flat top-level fields, so both get copied up to a
+        // `vpc_security_group_ids` key matching every other member kind.
+        // `AwsDbInstance` needs no arm: `vpc_security_group_ids` is already
+        // a flat top-level argument on `aws_db_instance`.
+        ResourceKind::AwsLambdaFunction => {
+            attributes.insert(
+                "vpc_security_group_ids".to_string(),
+                nested_block_field(&attributes, "vpc_config", "security_group_ids"),
+            );
+        }
+        ResourceKind::AwsEcsService => {
+            attributes.insert(
+                "vpc_security_group_ids".to_string(),
+                nested_block_field(&attributes, "network_configuration", "security_groups"),
+            );
+        }
         _ => {}
     }
 
     attributes
+}
+
+/// The value of `field` inside the single-element block `attributes[block]`
+/// renders as in `terraform show -json` — `Value::Array([])` when the block
+/// or field is absent, matching how a collector normalizes "nothing here"
+/// to an empty membership list rather than an error.
+fn nested_block_field(attributes: &Map<String, Value>, block: &str, field: &str) -> Value {
+    attributes
+        .get(block)
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.first())
+        .and_then(|b| b.get(field))
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
 }
 
 /// Whether the behavioral pass already reported this exact resource and field.

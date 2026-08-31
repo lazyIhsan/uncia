@@ -43,6 +43,9 @@ pub enum ResourceKind {
     /// group's `targets` before comparison. See
     /// `crate::diff::target_attachments`.
     AwsLbTargetGroupAttachment,
+    AwsLambdaFunction,
+    AwsDbInstance,
+    AwsEcsService,
     Other(String),
 }
 
@@ -60,6 +63,9 @@ impl ResourceKind {
             "aws_vpc_security_group_ingress_rule" => Self::AwsVpcSecurityGroupIngressRule,
             "aws_vpc_security_group_egress_rule" => Self::AwsVpcSecurityGroupEgressRule,
             "aws_lb_target_group_attachment" => Self::AwsLbTargetGroupAttachment,
+            "aws_lambda_function" => Self::AwsLambdaFunction,
+            "aws_db_instance" => Self::AwsDbInstance,
+            "aws_ecs_service" => Self::AwsEcsService,
             other => Self::Other(other.to_string()),
         }
     }
@@ -75,6 +81,9 @@ impl ResourceKind {
             Self::AwsVpcSecurityGroupIngressRule => "aws_vpc_security_group_ingress_rule",
             Self::AwsVpcSecurityGroupEgressRule => "aws_vpc_security_group_egress_rule",
             Self::AwsLbTargetGroupAttachment => "aws_lb_target_group_attachment",
+            Self::AwsLambdaFunction => "aws_lambda_function",
+            Self::AwsDbInstance => "aws_db_instance",
+            Self::AwsEcsService => "aws_ecs_service",
             Self::Other(s) => s,
         }
     }
