@@ -16,7 +16,8 @@ use crate::types::resource::ResourceKind;
 /// carries whatever security groups the load balancer names, exactly like an
 /// EC2 instance carries `vpc_security_group_ids` — both are "who is in this
 /// group," just discovered through different edge fields.
-const MEMBER_KINDS: &[ResourceKind] = &[ResourceKind::AwsInstance, ResourceKind::AwsLoadBalancer];
+pub(crate) const MEMBER_KINDS: &[ResourceKind] =
+    &[ResourceKind::AwsInstance, ResourceKind::AwsLoadBalancer];
 
 /// Security-group membership: a rule that trusts another group effectively
 /// trusts whatever is *in* that group, and the group's own attributes say

@@ -18,6 +18,7 @@
 //! [`compare`].
 
 pub mod graph;
+pub mod reachability;
 pub mod relations;
 
 use serde_json::{Map, Value};
