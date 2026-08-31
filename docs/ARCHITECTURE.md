@@ -123,16 +123,23 @@ moment severity depends on a model call, the finding stops being
 independently verifiable and becomes something you either trust or re-derive
 yourself, which defeats the point of automating the check at all.
 
-**The expansion path stays inside network exposure.** `sg_membership` and
-`instance_exposure` are two relations; the niche is "does this network
-boundary still mean what the Terraform says it means," and there is real
-depth to build there before uncia needs to leave it. `instance_exposure` — an
-instance's effective exposure is the union of its attached groups' rules —
-shipped in phase 3 of [`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md). `sg_membership`
-now also resolves an ALB/NLB as a member of a group it's attached to, not just
-direct EC2 attachment — an ALB's ENI carries whatever security groups the
-load balancer names, exactly like an instance carries
-`vpc_security_group_ids`; still ahead:
+**The expansion path stays inside network exposure.** `sg_membership`,
+`instance_exposure`, and `internet_reachability` are three relations; the
+niche is "does this network boundary still mean what the Terraform says it
+means," and there is real depth to build there before uncia needs to leave
+it. `instance_exposure` — an instance's effective exposure is the union of
+its attached groups' rules — shipped in phase 3 of
+[`SEMANTIC-DRIFT.md`](SEMANTIC-DRIFT.md). `sg_membership` also resolves an
+ALB/NLB as a member of a group it's attached to, not just direct EC2
+attachment — an ALB's ENI carries whatever security groups the load balancer
+names, exactly like an instance carries `vpc_security_group_ids`.
+`internet_reachability` composes both of those with load-balancer
+target-group registration and group-to-group trust into a bounded, multi-hop
+walk (`src/diff/semantic/reachability.rs`): given a graph, which resources
+does the public internet actually reach, and through what chain — not "is
+this rule byte-identical" but "does the internet still stop where your
+Terraform says it stops," however many security-group and load-balancer hops
+away. Still ahead:
 
 - the same membership question for Lambda ENIs, RDS, and ECS tasks — anything
   else that can sit inside a security group
@@ -141,10 +148,10 @@ load balancer names, exactly like an instance carries
 - a route table or peering change that alters what a CIDR range in a rule
   actually reaches
 
-Each of these has the same claim shape as `sg_membership`: a declared trust
-relationship, a live resolution, a `via` path that makes the finding
-checkable without reading uncia's source. That is depth within one niche, not
-breadth across many.
+Each of these has the same claim shape as the relations that exist today: a
+declared trust relationship, a live resolution, a `via` path that makes the
+finding checkable without reading uncia's source. That is depth within one
+niche, not breadth across many.
 
 **IAM effective-permissions and other non-network relations are deferred,
 not abandoned.** The IAM example above (a managed policy's contents drifting
