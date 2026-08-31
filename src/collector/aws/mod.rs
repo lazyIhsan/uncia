@@ -3,6 +3,7 @@
 pub mod ec2;
 pub mod load_balancer;
 pub mod security_group;
+pub mod target_group;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -40,6 +41,7 @@ impl Collector for AwsCollector {
         let mut out = security_group::fetch(&self.ec2).await?;
         out.extend(ec2::fetch(&self.ec2).await?);
         out.extend(load_balancer::fetch(&self.elbv2).await?);
+        out.extend(target_group::fetch(&self.elbv2).await?);
         Ok(out)
     }
 }
