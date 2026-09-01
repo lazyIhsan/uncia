@@ -28,8 +28,8 @@ pub(crate) const MEMBER_KINDS: &[ResourceKind] = &[
 
 /// Security-group membership: a rule that trusts another group effectively
 /// trusts whatever is *in* that group, and the group's own attributes say
-/// nothing about that. "In" means an EC2 instance or a load balancer that
-/// names the group — [`MEMBER_KINDS`].
+/// nothing about that. "In" means any of [`MEMBER_KINDS`] that names the
+/// group.
 ///
 /// This is the relation `docs/ARCHITECTURE.md` uses to motivate semantic drift.
 /// A rule reading `allow 443 from sg-app` is byte-identical before and after

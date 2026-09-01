@@ -139,10 +139,15 @@ walk (`src/diff/semantic/reachability.rs`): given a graph, which resources
 does the public internet actually reach, and through what chain — not "is
 this rule byte-identical" but "does the internet still stop where your
 Terraform says it stops," however many security-group and load-balancer hops
-away. Still ahead:
+away. Membership itself now reaches further than EC2 and load balancers too:
+a VPC-attached Lambda function, an RDS instance, and an `awsvpc`-mode ECS
+service each carry security groups exactly like an instance carries
+`vpc_security_group_ids`, so `sg_membership` resolves them as members with no
+relation-specific code, and `internet_reachability` can report a finding
+directly on one of them as the subject — "internet reaches your database" is
+provable against a real RDS instance, not just a stand-in EC2 instance
+downstream of it. Still ahead:
 
-- the same membership question for Lambda ENIs, RDS, and ECS tasks — anything
-  else that can sit inside a security group
 - NACL interaction — a security-group rule can be declared correctly and
   still not matter if a NACL blocks it
 - a route table or peering change that alters what a CIDR range in a rule

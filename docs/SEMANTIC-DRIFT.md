@@ -7,6 +7,14 @@ implemented and passing (see [Phasing](#phasing)). This document specifies the
 mechanism, fixes the decisions that are cheap now and expensive later, and
 names what it deliberately leaves unsettled.
 
+This document's own phasing closes at `instance_exposure` (phase 3) — what
+shipped afterward (the `internet_reachability` relation, and `sg_membership`
+membership growing from EC2 instances and load balancers to also cover
+Lambda functions, RDS instances, and ECS services) followed the shape
+specified here rather than changing it, so it's tracked in
+[`ARCHITECTURE.md`'s expansion-path notes](ARCHITECTURE.md#why-network-exposure-drift-not-general-drift)
+instead of a rewrite of this doc.
+
 Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — this document assumes the
 [two drift classes](ARCHITECTURE.md#the-two-drift-classes) and the
 [invariants](ARCHITECTURE.md#invariants), and extends both.
@@ -227,13 +235,16 @@ This relation is the right pilot for three reasons: it is the exact scenario
 already normalized on both sides), and it reuses `explode_rules` from
 `behavioral.rs`, so the atom canonicalization stays in one place.
 
-**Membership now has two kinds of member.** An ALB's ENI carries whatever
+**Membership now has five kinds of member.** An ALB's ENI carries whatever
 security groups the load balancer names, exactly like an instance carries
-`vpc_security_group_ids` — `src/diff/semantic/relations.rs`'s `MEMBER_KINDS`
-searches `[AwsInstance, AwsLoadBalancer]` and tags both the same atom shape
-(`{base}/member:{id}`). No new relation: a rule like `allow 443 from sg-alb`
-used to resolve to zero members, silently, because nothing searched for
-non-instance holders of `sg-alb`. `requires()` stays `[AwsInstance]` only —
+`vpc_security_group_ids`; a VPC-attached Lambda function, an RDS instance, and
+an `awsvpc`-mode ECS service each carry the same field, just discovered
+through different edges — `src/diff/semantic/relations.rs`'s `MEMBER_KINDS`
+searches `[AwsInstance, AwsLoadBalancer, AwsLambdaFunction, AwsDbInstance,
+AwsEcsService]` and tags all five the same atom shape (`{base}/member:{id}`).
+No new relation for any of them: a rule like `allow 443 from sg-alb` used to
+resolve to zero members, silently, because nothing searched for non-instance
+holders of `sg-alb`. `requires()` stays `[AwsInstance]` only —
 see the authority-check discussion below for why adding `AwsLoadBalancer`
 there would be a regression, not a fix.
 
@@ -434,9 +445,13 @@ passes and owns disjointness, mirroring how `state::parse` dispatches while
 
 ## Out of scope
 
-- **Reachability analysis.** Whether traffic *actually* flows involves route
-  tables, NACLs, and peering. Semantic drift reports that a trust relationship
-  changed meaning, not that a packet arrives.
+- **Packet-level reachability.** Whether traffic *actually* flows involves
+  route tables, NACLs, and peering. Semantic drift reports that a trust
+  relationship changed meaning, not that a packet arrives — this still holds
+  for the `internet_reachability` relation that shipped after this document:
+  it walks a bounded security-group and load-balancer chain, not the
+  network layer, so NACLs, route tables, and peering remain out of scope
+  and are tracked as such in `ARCHITECTURE.md`'s expansion path.
 - **Cross-account and cross-region graphs.** Single account, single region.
   *Revisit once a relation genuinely needs it; the graph is keyed by cloud ID,
   which is not globally unique across accounts, so this is a real change.*
