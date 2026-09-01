@@ -18,6 +18,7 @@
 //! [`compare`].
 
 pub mod graph;
+pub mod nacl;
 pub mod reachability;
 pub mod relations;
 
