@@ -46,6 +46,7 @@ pub enum ResourceKind {
     AwsLambdaFunction,
     AwsDbInstance,
     AwsEcsService,
+    AwsNetworkAcl,
     Other(String),
 }
 
@@ -66,6 +67,7 @@ impl ResourceKind {
             "aws_lambda_function" => Self::AwsLambdaFunction,
             "aws_db_instance" => Self::AwsDbInstance,
             "aws_ecs_service" => Self::AwsEcsService,
+            "aws_network_acl" => Self::AwsNetworkAcl,
             other => Self::Other(other.to_string()),
         }
     }
@@ -84,6 +86,7 @@ impl ResourceKind {
             Self::AwsLambdaFunction => "aws_lambda_function",
             Self::AwsDbInstance => "aws_db_instance",
             Self::AwsEcsService => "aws_ecs_service",
+            Self::AwsNetworkAcl => "aws_network_acl",
             Self::Other(s) => s,
         }
     }
