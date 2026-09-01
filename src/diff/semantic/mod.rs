@@ -18,6 +18,7 @@
 //! [`compare`].
 
 pub mod graph;
+pub mod nacl;
 pub mod reachability;
 pub mod relations;
 
@@ -246,25 +247,37 @@ fn effective_attributes(
                 ),
             );
         }
-        // Both nest their security-group list one level inside a single
-        // block — `vpc_config { security_group_ids = [...] }`,
-        // `network_configuration { security_groups = [...] }` — which
-        // `terraform show -json` renders as a one-element array, the same
-        // shape as `metadata_options` on `aws_instance`. `EDGE_FIELDS` only
-        // reads flat top-level fields, so both get copied up to a
-        // `vpc_security_group_ids` key matching every other member kind.
-        // `AwsDbInstance` needs no arm: `vpc_security_group_ids` is already
-        // a flat top-level argument on `aws_db_instance`.
+        // Both nest their security-group and subnet lists one level inside a
+        // single block — `vpc_config { security_group_ids = [...], subnet_ids
+        // = [...] }`, `network_configuration { security_groups = [...],
+        // subnets = [...] }` — which `terraform show -json` renders as a
+        // one-element array, the same shape as `metadata_options` on
+        // `aws_instance`. `EDGE_FIELDS` only reads flat top-level fields, so
+        // both get copied up to `vpc_security_group_ids`/`subnet_ids` keys
+        // matching every other member kind. `AwsDbInstance` needs no arm for
+        // `vpc_security_group_ids` — that's already a flat top-level
+        // argument on `aws_db_instance` — and none yet for subnets either:
+        // `aws_db_instance` has no `subnet_ids` of its own at all, only a
+        // `db_subnet_group_name` reference to a separate resource this
+        // module doesn't collect yet.
         ResourceKind::AwsLambdaFunction => {
             attributes.insert(
                 "vpc_security_group_ids".to_string(),
                 nested_block_field(&attributes, "vpc_config", "security_group_ids"),
+            );
+            attributes.insert(
+                "subnet_ids".to_string(),
+                nested_block_field(&attributes, "vpc_config", "subnet_ids"),
             );
         }
         ResourceKind::AwsEcsService => {
             attributes.insert(
                 "vpc_security_group_ids".to_string(),
                 nested_block_field(&attributes, "network_configuration", "security_groups"),
+            );
+            attributes.insert(
+                "subnet_ids".to_string(),
+                nested_block_field(&attributes, "network_configuration", "subnets"),
             );
         }
         _ => {}
@@ -317,5 +330,86 @@ fn severity_for(declared: &Value, actual: &Value) -> Severity {
         Severity::High
     } else {
         Severity::Low
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::resource::ResourceId;
+    use serde_json::json;
+
+    fn resource(kind: ResourceKind, attributes: Value) -> Resource {
+        Resource {
+            id: ResourceId("under_test".to_string()),
+            kind,
+            attributes: attributes.as_object().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn a_lambda_functions_declared_vpc_config_flattens_subnet_ids_to_the_top_level() {
+        let r = resource(
+            ResourceKind::AwsLambdaFunction,
+            json!({
+                "id": "my-function",
+                "vpc_config": [{
+                    "security_group_ids": ["sg-1111"],
+                    "subnet_ids": ["subnet-1111", "subnet-2222"],
+                }],
+            }),
+        );
+        let attrs =
+            effective_attributes(&r, &SiblingRules::default(), &TargetAttachments::default());
+        assert_eq!(attrs["subnet_ids"], json!(["subnet-1111", "subnet-2222"]));
+    }
+
+    #[test]
+    fn a_lambda_function_with_no_vpc_config_flattens_subnet_ids_to_an_empty_list() {
+        let r = resource(
+            ResourceKind::AwsLambdaFunction,
+            json!({"id": "my-function"}),
+        );
+        let attrs =
+            effective_attributes(&r, &SiblingRules::default(), &TargetAttachments::default());
+        assert_eq!(attrs["subnet_ids"], json!([]));
+    }
+
+    #[test]
+    fn an_ecs_services_declared_network_configuration_flattens_subnets_to_the_top_level() {
+        let r = resource(
+            ResourceKind::AwsEcsService,
+            json!({
+                "id": "arn:svc/1",
+                "network_configuration": [{
+                    "security_groups": ["sg-1111"],
+                    "subnets": ["subnet-1111", "subnet-2222"],
+                }],
+            }),
+        );
+        let attrs =
+            effective_attributes(&r, &SiblingRules::default(), &TargetAttachments::default());
+        assert_eq!(attrs["subnet_ids"], json!(["subnet-1111", "subnet-2222"]));
+    }
+
+    #[test]
+    fn an_ecs_service_with_no_network_configuration_flattens_subnets_to_an_empty_list() {
+        let r = resource(ResourceKind::AwsEcsService, json!({"id": "arn:svc/1"}));
+        let attrs =
+            effective_attributes(&r, &SiblingRules::default(), &TargetAttachments::default());
+        assert_eq!(attrs["subnet_ids"], json!([]));
+    }
+
+    #[test]
+    fn a_db_instance_gets_no_subnet_ids_arm() {
+        // aws_db_instance has no subnet_ids of its own to flatten - see the
+        // comment on the AwsEcsService/AwsLambdaFunction match arms.
+        let r = resource(
+            ResourceKind::AwsDbInstance,
+            json!({"id": "db-ABCDEF", "vpc_security_group_ids": ["sg-1111"]}),
+        );
+        let attrs =
+            effective_attributes(&r, &SiblingRules::default(), &TargetAttachments::default());
+        assert!(!attrs.contains_key("subnet_ids"));
     }
 }

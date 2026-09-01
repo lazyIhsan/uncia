@@ -4,6 +4,7 @@ pub mod ec2;
 pub mod ecs;
 pub mod lambda;
 pub mod load_balancer;
+pub mod network_acl;
 pub mod rds;
 pub mod security_group;
 pub mod target_group;
@@ -54,6 +55,7 @@ impl Collector for AwsCollector {
         out.extend(lambda::fetch(&self.lambda).await?);
         out.extend(rds::fetch(&self.rds).await?);
         out.extend(ecs::fetch(&self.ecs).await?);
+        out.extend(network_acl::fetch(&self.ec2).await?);
         Ok(out)
     }
 }
