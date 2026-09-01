@@ -29,6 +29,17 @@
 //! collector but not consulted here. Known gap, not a silent one — nothing
 //! in this codebase's security-group side models ICMP type/code either, so
 //! there is no caller yet that could supply them.
+//!
+//! **A query is a port *range*, matched by full containment.** The
+//! security-group rule that establishes reachability can open a range
+//! (`1024-65535`, not just one port), so a query asks "does this NACL allow
+//! the *entire* range," not "does some port in it happen to match." A NACL
+//! rule matches only when its own range fully contains the query's — the
+//! same literal, no-partial-credit philosophy as the CIDR match above. A
+//! query answered only by *several* NACL rules together, each covering part
+//! of the range, is not currently detected as a match; that would be
+//! genuine range-union arithmetic, not a literal check, and there is no
+//! caller yet that needs it.
 
 use serde_json::Value;
 
@@ -46,17 +57,23 @@ pub enum Verdict {
 /// the shape `collector::aws::network_acl` normalizes — against a flow from
 /// `source_cidr` on `protocol` (the NACL API's own
 /// protocol-*number* string convention: `"-1"`, `"6"` for tcp, `"17"` for
-/// udp, ...) at `port`.
+/// udp, ...) spanning `port_from..=port_to` (equal for a single port).
 ///
 /// Rules are considered in ascending `rule_no` order and the first match
 /// wins, mirroring AWS's own evaluation order exactly. No match is implicit
 /// deny.
-pub fn evaluate(entries: &[Value], source_cidr: &str, protocol: &str, port: i64) -> Verdict {
+pub fn evaluate(
+    entries: &[Value],
+    source_cidr: &str,
+    protocol: &str,
+    port_from: i64,
+    port_to: i64,
+) -> Verdict {
     let winner = entries
         .iter()
         .filter(|e| rule_source_matches(e, source_cidr))
         .filter(|e| rule_protocol_matches(e, protocol))
-        .filter(|e| rule_port_matches(e, port))
+        .filter(|e| rule_port_matches(e, port_from, port_to))
         .filter_map(|e| {
             let rule_no = e.get("rule_no").and_then(Value::as_i64)?;
             let action = e.get("action").and_then(Value::as_str)?;
@@ -93,13 +110,16 @@ fn rule_protocol_matches(entry: &Value, protocol: &str) -> bool {
 /// A protocol-`"-1"` rule carries no real port range — `network_acl.rs`
 /// normalizes its absent `from_port`/`to_port` to `0`/`0`, which would
 /// wrongly exclude every port if treated as a literal range here.
-fn rule_port_matches(entry: &Value, port: i64) -> bool {
+///
+/// Containment, not overlap: the rule's own range must cover the *entire*
+/// `port_from..=port_to` query, not just intersect it.
+fn rule_port_matches(entry: &Value, port_from: i64, port_to: i64) -> bool {
     if entry.get("protocol").and_then(Value::as_str) == Some("-1") {
         return true;
     }
     let from = entry.get("from_port").and_then(Value::as_i64).unwrap_or(0);
     let to = entry.get("to_port").and_then(Value::as_i64).unwrap_or(0);
-    (from..=to).contains(&port)
+    from <= port_from && port_to <= to
 }
 
 #[cfg(test)]
@@ -135,25 +155,34 @@ mod tests {
     #[test]
     fn an_explicit_allow_rule_matching_the_flow_allows_it() {
         let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 443, 443)];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Allow);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Allow
+        );
     }
 
     #[test]
     fn an_explicit_deny_rule_matching_the_flow_denies_it() {
         let entries = vec![rule(100, "deny", "6", "0.0.0.0/0", 443, 443)];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Deny);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Deny
+        );
     }
 
     #[test]
     fn no_matching_rule_is_implicit_deny() {
         let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 22, 22)];
         // Port 443 matches no rule at all.
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Deny);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Deny
+        );
     }
 
     #[test]
     fn an_empty_rule_set_is_implicit_deny() {
-        assert_eq!(evaluate(&[], "0.0.0.0/0", "6", 443), Verdict::Deny);
+        assert_eq!(evaluate(&[], "0.0.0.0/0", "6", 443, 443), Verdict::Deny);
     }
 
     #[test]
@@ -165,7 +194,10 @@ mod tests {
             rule(200, "allow", "-1", "0.0.0.0/0", 0, 0),
             rule(100, "deny", "6", "0.0.0.0/0", 443, 443),
         ];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Deny);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Deny
+        );
     }
 
     #[test]
@@ -176,7 +208,10 @@ mod tests {
         ];
         // Rule 100 doesn't match (wrong port), so rule 200 is the real
         // first match, not an implicit deny.
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Allow);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Allow
+        );
     }
 
     #[test]
@@ -184,15 +219,21 @@ mod tests {
         // A "-1" rule normalizes from_port/to_port to 0/0 (network_acl.rs);
         // that must not be read as "only port 0".
         let entries = vec![rule(100, "allow", "-1", "0.0.0.0/0", 0, 0)];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Allow);
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "17", 53), Verdict::Allow);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Allow
+        );
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "17", 53, 53),
+            Verdict::Allow
+        );
     }
 
     #[test]
     fn a_query_for_protocol_all_only_matches_an_unrestricted_rule() {
         let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 443, 443)];
         // The rule only covers tcp/443, not "every protocol".
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "-1", 0), Verdict::Deny);
+        assert_eq!(evaluate(&entries, "0.0.0.0/0", "-1", 0, 0), Verdict::Deny);
     }
 
     #[test]
@@ -201,26 +242,56 @@ mod tests {
         // 0.0.0.0/0, even though every address in it is technically
         // contained in the wider range.
         let entries = vec![rule(100, "allow", "6", "10.0.0.0/8", 443, 443)];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Deny);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Deny
+        );
     }
 
     #[test]
     fn an_ipv6_rule_matches_the_ipv6_literal_source() {
         let entries = vec![ipv6_rule(100, "allow", "6", "::/0", 443, 443)];
-        assert_eq!(evaluate(&entries, "::/0", "6", 443), Verdict::Allow);
+        assert_eq!(evaluate(&entries, "::/0", "6", 443, 443), Verdict::Allow);
         // The ipv4 query gets no match from an ipv6-only rule.
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 443), Verdict::Deny);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 443, 443),
+            Verdict::Deny
+        );
     }
 
     #[test]
     fn a_port_within_a_ranged_rule_matches() {
         let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 1024, 65535)];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 8080), Verdict::Allow);
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 8080, 8080),
+            Verdict::Allow
+        );
     }
 
     #[test]
     fn a_port_outside_the_ranged_rule_does_not_match() {
         let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 1024, 65535)];
-        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 80), Verdict::Deny);
+        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 80, 80), Verdict::Deny);
+    }
+
+    #[test]
+    fn a_query_range_fully_contained_in_the_rules_range_matches() {
+        let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 1024, 65535)];
+        // The query's own range (a ranged SG rule, not a single port) must
+        // be fully covered by the NACL rule to match.
+        assert_eq!(
+            evaluate(&entries, "0.0.0.0/0", "6", 8000, 9000),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn a_query_range_only_partially_covered_does_not_match() {
+        // The NACL rule covers 1024-65535; the query asks about 80-443,
+        // which only partially overlaps (443 is inside, 80 is not). Partial
+        // coverage is not containment, so this is not a match - the same
+        // no-partial-credit philosophy as the CIDR match.
+        let entries = vec![rule(100, "allow", "6", "0.0.0.0/0", 1024, 65535)];
+        assert_eq!(evaluate(&entries, "0.0.0.0/0", "6", 80, 443), Verdict::Deny);
     }
 }

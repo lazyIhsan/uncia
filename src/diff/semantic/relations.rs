@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::Relation;
 use super::graph::{Graph, Node};
+use super::nacl;
 use super::reachability;
 use crate::diff::rules::{explode_rules, rule_base};
 use crate::types::resource::ResourceKind;
@@ -236,7 +237,8 @@ const MAX_HOPS: usize = 12;
 
 /// Internet reachability: whether the public internet can reach a declared
 /// instance at all, however many security-group, load-balancer, or trust
-/// hops away.
+/// hops away — and, where a network ACL governs the subject's own subnet,
+/// whether the NACL actually lets that specific flow through.
 ///
 /// The transitive generalization of [`InstanceExposure`]: that relation
 /// reads only the rules on an instance's *directly* attached groups, so a
@@ -245,31 +247,139 @@ const MAX_HOPS: usize = 12;
 /// itself traces back to the internet. This relation answers that question
 /// by walking [`reachability::reachable_from`] from every internet-facing
 /// group and checking whether the subject instance is among what's found.
+///
+/// **The NACL gate only ever narrows, and only when the graph being
+/// expanded has NACL data for the subject's subnet at all.** A state file
+/// that never declares `aws_network_acl`/`aws_default_network_acl` — most
+/// accounts never touch NACLs beyond AWS's own wide-open default — has no
+/// node to check against, so [`subnet_allows`] returns `None` and the chain
+/// passes through exactly as it did before this gate existed. This carries
+/// the same known, narrow, accepted-not-solved risk `SgMembership` already
+/// documents for `AwsLoadBalancer`: an account with a real, restrictive
+/// custom NACL that is *never* declared in Terraform at all could see a
+/// declared/live mismatch that isn't genuine drift, because only the live
+/// side ever has that NACL's real rules to evaluate. Narrower in practice
+/// than it sounds — a team disciplined enough to lock down a custom NACL is
+/// disproportionately likely to also manage it as code.
 pub struct InternetReachability;
 
 impl InternetReachability {
     /// Every distinct chain (entry group, then each hop, ending at the
-    /// subject) from an internet-facing group to `subject` in `graph`.
+    /// subject) from an internet-facing group to `subject` in `graph`,
+    /// excluding any the subject's own subnet NACL actually blocks.
     fn chains(subject: &Node, graph: &Graph) -> Vec<Vec<String>> {
         let mut chains = Vec::new();
-        for entry in reachability::internet_facing_groups(graph) {
-            let reached = reachability::reachable_from(
-                graph,
-                &ResourceKind::AwsSecurityGroup,
-                &entry,
-                MAX_HOPS,
-            );
-            for r in reached {
-                if r.kind != subject.kind || r.cloud_id != subject.cloud_id {
-                    continue;
+        for (entry, entry_points) in reachability::internet_facing_groups(graph) {
+            for entry_point in &entry_points {
+                let reached = reachability::reachable_from(
+                    graph,
+                    &ResourceKind::AwsSecurityGroup,
+                    &entry,
+                    std::slice::from_ref(&entry_point.port),
+                    MAX_HOPS,
+                );
+                for r in reached {
+                    if r.kind != subject.kind || r.cloud_id != subject.cloud_id {
+                        continue;
+                    }
+                    if subnet_allows(subject, graph, &entry_point.source_cidr, &r.ports)
+                        == Some(false)
+                    {
+                        continue;
+                    }
+                    let mut chain = vec![entry.clone()];
+                    chain.extend(r.path.iter().cloned());
+                    chains.push(chain);
                 }
-                let mut chain = vec![entry.clone()];
-                chain.extend(r.path.iter().cloned());
-                chains.push(chain);
             }
         }
         chains
     }
+}
+
+/// The subnet(s) `subject` runs in, per its own kind's collected shape.
+/// `AwsDbInstance` isn't included: RDS subnet resolution needs its own
+/// `aws_db_subnet_group` collector, not yet built (see
+/// `collector::aws::rds`'s module docs).
+fn subject_subnet_ids(subject: &Node) -> Vec<String> {
+    match subject.kind {
+        ResourceKind::AwsInstance => subject
+            .attributes
+            .get("subnet_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| vec![id.to_string()])
+            .unwrap_or_default(),
+        ResourceKind::AwsLambdaFunction | ResourceKind::AwsEcsService => subject
+            .attributes
+            .get("subnet_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `subject`'s own subnet(s) let a flow from `source_cidr` on any of
+/// `ports` through, per the ingress rules of whichever `AwsNetworkAcl` node
+/// in `graph` covers each subnet.
+///
+/// `None` means "no NACL data to check" — either the subject's kind doesn't
+/// have subnet resolution yet, or `graph` has no `AwsNetworkAcl` node
+/// covering any of its subnets at all — and the caller must treat that as
+/// "don't filter," never as a denial. `Some(true)`/`Some(false)` means a
+/// covering NACL was actually found and evaluated; reachable through *any*
+/// one of the subject's subnets is enough, since which subnet a given
+/// invocation actually lands in (for a multi-subnet Lambda function or ECS
+/// service) isn't something this graph can predict.
+fn subnet_allows(
+    subject: &Node,
+    graph: &Graph,
+    source_cidr: &str,
+    ports: &[reachability::PortSpec],
+) -> Option<bool> {
+    let subnet_ids = subject_subnet_ids(subject);
+    if subnet_ids.is_empty() {
+        return None;
+    }
+
+    let mut covered = false;
+    for nacl in graph.nodes_of_kind(&ResourceKind::AwsNetworkAcl) {
+        let nacl_subnets: Vec<&str> = nacl
+            .attributes
+            .get("subnet_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if !subnet_ids
+            .iter()
+            .any(|id| nacl_subnets.contains(&id.as_str()))
+        {
+            continue;
+        }
+        covered = true;
+
+        let ingress = nacl
+            .attributes
+            .get("ingress")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for port in ports {
+            if nacl::evaluate(&ingress, source_cidr, &port.protocol, port.from, port.to)
+                == nacl::Verdict::Allow
+            {
+                return Some(true);
+            }
+        }
+    }
+
+    if covered { Some(false) } else { None }
 }
 
 impl Relation for InternetReachability {
@@ -915,5 +1025,229 @@ mod tests {
             effective,
             json!(["via:sg-web>arn:alb/1>arn:tg/1>i-app>sg-db>db-ABCDEF"])
         );
+    }
+
+    // --- InternetReachability: NACL gate ---
+
+    fn instance_in_subnet(sgs: Value, subnet_id: &str) -> Map<String, Value> {
+        attrs(json!({"vpc_security_group_ids": sgs, "subnet_id": subnet_id}))
+    }
+
+    fn nacl_rule(
+        rule_no: i64,
+        action: &str,
+        protocol: &str,
+        cidr: &str,
+        from: i64,
+        to: i64,
+    ) -> Value {
+        json!({
+            "rule_no": rule_no, "action": action, "protocol": protocol,
+            "cidr_block": cidr, "ipv6_cidr_block": "",
+            "from_port": from, "to_port": to,
+            "icmp_type": 0, "icmp_code": 0,
+        })
+    }
+
+    fn nacl_with_ingress(subnet_ids: Value, rule: Value) -> Map<String, Value> {
+        attrs(json!({"subnet_ids": subnet_ids, "ingress": [rule], "egress": []}))
+    }
+
+    #[test]
+    fn a_denying_nacl_on_the_subjects_subnet_blocks_an_otherwise_reachable_instance() {
+        let web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let worker = instance_in_subnet(json!(["sg-web"]), "subnet-a");
+        let nacl = nacl_with_ingress(
+            json!(["subnet-a"]),
+            nacl_rule(100, "deny", "6", "0.0.0.0/0", 443, 443),
+        );
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+                (&ResourceKind::AwsNetworkAcl, "acl-1", &nacl),
+            ]
+            .into_iter(),
+        );
+
+        let subject = instance_subject("i-worker", &worker);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(
+            effective,
+            json!([]),
+            "the NACL denies port 443, so no chain survives"
+        );
+    }
+
+    #[test]
+    fn an_allowing_nacl_on_the_subjects_subnet_keeps_the_chain() {
+        let web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let worker = instance_in_subnet(json!(["sg-web"]), "subnet-a");
+        let nacl = nacl_with_ingress(
+            json!(["subnet-a"]),
+            nacl_rule(100, "allow", "6", "0.0.0.0/0", 443, 443),
+        );
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+                (&ResourceKind::AwsNetworkAcl, "acl-1", &nacl),
+            ]
+            .into_iter(),
+        );
+
+        let subject = instance_subject("i-worker", &worker);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(effective, json!(["via:sg-web>i-worker"]));
+    }
+
+    #[test]
+    fn a_nacl_loosening_outside_terraform_widens_reachability_with_nothing_on_the_sg_changing() {
+        // The scenario ARCHITECTURE.md motivates this whole gate for: a
+        // security-group rule can be declared correctly and still not
+        // matter if a NACL blocks it. Nothing about sg-web or i-worker
+        // moves - only the live NACL's rule set does.
+        let web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let worker = instance_in_subnet(json!(["sg-web"]), "subnet-a");
+
+        let declared_nacl = nacl_with_ingress(
+            json!(["subnet-a"]),
+            nacl_rule(100, "deny", "6", "0.0.0.0/0", 443, 443),
+        );
+        let declared = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+                (&ResourceKind::AwsNetworkAcl, "acl-1", &declared_nacl),
+            ]
+            .into_iter(),
+        );
+
+        let live_nacl = nacl_with_ingress(
+            json!(["subnet-a"]),
+            nacl_rule(100, "allow", "6", "0.0.0.0/0", 443, 443),
+        );
+        let live = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsInstance, "i-worker", &worker),
+                (&ResourceKind::AwsNetworkAcl, "acl-1", &live_nacl),
+            ]
+            .into_iter(),
+        );
+
+        let subject = instance_subject("i-worker", &worker);
+        let before = InternetReachability.expand(&subject, &declared).unwrap();
+        let after = InternetReachability.expand(&subject, &live).unwrap();
+
+        assert_eq!(before, json!([]));
+        assert_eq!(after, json!(["via:sg-web>i-worker"]));
+    }
+
+    #[test]
+    fn reachable_through_any_one_of_a_functions_several_subnets() {
+        // subnet-a's NACL denies; subnet-b's allows. The function is still
+        // reachable, because some invocations land in subnet-b - which
+        // subnet a given invocation actually uses isn't something the
+        // graph can predict.
+        let web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        let function = attrs(json!({
+            "vpc_security_group_ids": ["sg-web"],
+            "subnet_ids": ["subnet-a", "subnet-b"],
+        }));
+        let nacl_a = nacl_with_ingress(
+            json!(["subnet-a"]),
+            nacl_rule(100, "deny", "6", "0.0.0.0/0", 443, 443),
+        );
+        let nacl_b = nacl_with_ingress(
+            json!(["subnet-b"]),
+            nacl_rule(100, "allow", "6", "0.0.0.0/0", 443, 443),
+        );
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsLambdaFunction, "my-function", &function),
+                (&ResourceKind::AwsNetworkAcl, "acl-a", &nacl_a),
+                (&ResourceKind::AwsNetworkAcl, "acl-b", &nacl_b),
+            ]
+            .into_iter(),
+        );
+
+        let subject = subject_of(ResourceKind::AwsLambdaFunction, "my-function", &function);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(effective, json!(["via:sg-web>my-function"]));
+    }
+
+    #[test]
+    fn rds_subjects_are_never_nacl_gated_pending_subnet_group_support() {
+        // Even a deny-everything NACL has nothing to match against: an
+        // AwsDbInstance subject carries no subnet_ids yet (needs its own
+        // aws_db_subnet_group collector - see collector::aws::rds).
+        let web = sg_with_ingress(cidr_rule(5432, 5432, "0.0.0.0/0"));
+        let db = instance_in(json!(["sg-web"]));
+        let nacl = nacl_with_ingress(
+            json!(["subnet-a"]),
+            nacl_rule(100, "deny", "-1", "0.0.0.0/0", 0, 0),
+        );
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &web),
+                (&ResourceKind::AwsDbInstance, "db-ABCDEF", &db),
+                (&ResourceKind::AwsNetworkAcl, "acl-a", &nacl),
+            ]
+            .into_iter(),
+        );
+
+        let subject = subject_of(ResourceKind::AwsDbInstance, "db-ABCDEF", &db);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(effective, json!(["via:sg-web>db-ABCDEF"]));
+    }
+
+    /// A group trusting `source` on a port distinct from `sg_trusting`'s
+    /// (443, the same value the flagship entry rules in this module use) -
+    /// so a test can tell "the entry's port leaked through" apart from
+    /// "the trust hop's own port was correctly used."
+    fn sg_trusting_on(source: &str, port: i64) -> Map<String, Value> {
+        attrs(json!({"ingress": [{
+            "from_port": port, "to_port": port, "protocol": "tcp",
+            "cidr_blocks": [], "ipv6_cidr_blocks": [], "prefix_list_ids": [],
+            "security_groups": [source], "self": false,
+        }]}))
+    }
+
+    #[test]
+    fn the_nacl_check_at_the_end_of_a_chain_uses_the_final_hops_port_not_the_entrys() {
+        // internet enters sg-web on 443; the trust hop into sg-db happens
+        // on 5432 (sg-db's own rule). The database's subnet NACL must be
+        // checked against 5432, not 443 - a NACL that allows 5432 but
+        // would deny 443 proves which one actually got used.
+        let sg_web = sg_with_ingress(cidr_rule(443, 443, "0.0.0.0/0"));
+        // i-app is a direct member of sg-web (reached at 443) and also
+        // carries sg-app, whose trust relationship with sg-db is what
+        // matters here - no ALB/target-group hop needed to make the point.
+        let app = instance_in(json!(["sg-web", "sg-app"]));
+        let sg_app = attrs(json!({"name": "app"}));
+        let sg_db = sg_trusting_on("sg-app", 5432);
+        let db = instance_in_subnet(json!(["sg-db"]), "subnet-db");
+
+        let nacl = nacl_with_ingress(
+            json!(["subnet-db"]),
+            nacl_rule(100, "allow", "6", "0.0.0.0/0", 5432, 5432),
+        );
+        let g = graph::build(
+            [
+                (&ResourceKind::AwsSecurityGroup, "sg-web", &sg_web),
+                (&ResourceKind::AwsInstance, "i-app", &app),
+                (&ResourceKind::AwsSecurityGroup, "sg-app", &sg_app),
+                (&ResourceKind::AwsSecurityGroup, "sg-db", &sg_db),
+                (&ResourceKind::AwsInstance, "i-db", &db),
+                (&ResourceKind::AwsNetworkAcl, "acl-db", &nacl),
+            ]
+            .into_iter(),
+        );
+
+        let subject = instance_subject("i-db", &db);
+        let effective = InternetReachability.expand(&subject, &g).unwrap();
+        assert_eq!(effective, json!(["via:sg-web>i-app>sg-db>i-db"]));
     }
 }
