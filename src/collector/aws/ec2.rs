@@ -10,6 +10,10 @@
 //! public/private DNS, `instance_state`, `arn` — are never emitted for
 //! comparison: they change on stop/start and would drown the signal.
 //!
+//! `subnet_id` is also normalized but deliberately not in the compared field
+//! set above — it exists to let a future semantic relation resolve which
+//! network ACL governs an instance, not for behavioral drift tracking.
+//!
 //! Normalization pitfalls handled here:
 //! - Terminated / shutting-down instances are skipped (return `None`). Such an
 //!   instance is effectively gone, so the declared resource fails to join and
@@ -84,6 +88,10 @@ fn normalize(instance: &Instance) -> Option<LiveResource> {
     let mut attributes = Map::new();
     attributes.insert("id".into(), json!(instance_id));
     attributes.insert(
+        "subnet_id".into(),
+        json!(instance.subnet_id().unwrap_or_default()),
+    );
+    attributes.insert(
         "instance_type".into(),
         json!(
             instance
@@ -139,6 +147,7 @@ mod tests {
     fn running_instance() -> Instance {
         Instance::builder()
             .instance_id("i-0abc123def4567890")
+            .subnet_id("subnet-0aa11bb22cc33dd44")
             .instance_type(InstanceType::T3Medium)
             .image_id("ami-0aabbccdd11223344")
             .state(
@@ -171,6 +180,7 @@ mod tests {
 
         assert_eq!(live.cloud_id, "i-0abc123def4567890");
         assert_eq!(live.kind, ResourceKind::AwsInstance);
+        assert_eq!(live.attributes["subnet_id"], "subnet-0aa11bb22cc33dd44");
         assert_eq!(live.attributes["instance_type"], "t3.medium");
         assert_eq!(live.attributes["ami"], "ami-0aabbccdd11223344");
         assert_eq!(live.attributes["tags"]["Name"], "web");
@@ -214,6 +224,7 @@ mod tests {
             .build();
         let live = normalize(&bare).unwrap();
         assert_eq!(live.attributes["iam_instance_profile"], "");
+        assert_eq!(live.attributes["subnet_id"], "");
         // A stopped instance is still collected.
         assert_eq!(live.cloud_id, "i-noprofile0000000");
     }

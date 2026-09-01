@@ -30,6 +30,12 @@
 //! networking, or services with no `network_configuration` at all) don't
 //! carry a per-service security-group list — that normalizes to an empty
 //! membership list, not a skipped service.
+//!
+//! `subnet_ids` is also normalized (an `awsvpc`-mode service can span
+//! multiple subnets, one ENI per task per subnet/AZ) but not compared for
+//! behavioral drift — `diff::behavioral` already skips every field on this
+//! kind, since it has no `FIELDS` entry at all. It exists to let a future
+//! semantic relation resolve which network ACLs govern a service.
 
 use aws_sdk_ecs::error::DisplayErrorContext;
 use aws_sdk_ecs::types::Service;
@@ -101,9 +107,10 @@ async fn fetch_cluster_services(
 fn normalize(service: &Service) -> Option<LiveResource> {
     let arn = service.service_arn()?.to_string();
 
-    let security_group_ids: Vec<&str> = service
+    let awsvpc_config = service
         .network_configuration()
-        .and_then(|nc| nc.awsvpc_configuration())
+        .and_then(|nc| nc.awsvpc_configuration());
+    let security_group_ids: Vec<&str> = awsvpc_config
         .map(|vpc_config| {
             vpc_config
                 .security_groups()
@@ -112,10 +119,14 @@ fn normalize(service: &Service) -> Option<LiveResource> {
                 .collect()
         })
         .unwrap_or_default();
+    let subnet_ids: Vec<&str> = awsvpc_config
+        .map(|vpc_config| vpc_config.subnets().iter().map(String::as_str).collect())
+        .unwrap_or_default();
 
     let mut attributes = Map::new();
     attributes.insert("id".into(), json!(arn));
     attributes.insert("vpc_security_group_ids".into(), json!(security_group_ids));
+    attributes.insert("subnet_ids".into(), json!(subnet_ids));
 
     Some(LiveResource {
         cloud_id: arn,
@@ -140,6 +151,7 @@ mod tests {
                             .security_groups("sg-1111")
                             .security_groups("sg-2222")
                             .subnets("subnet-1111")
+                            .subnets("subnet-2222")
                             .build()
                             .unwrap(),
                     )
@@ -162,6 +174,10 @@ mod tests {
             live.attributes["vpc_security_group_ids"],
             json!(["sg-1111", "sg-2222"])
         );
+        assert_eq!(
+            live.attributes["subnet_ids"],
+            json!(["subnet-1111", "subnet-2222"])
+        );
     }
 
     #[test]
@@ -174,6 +190,7 @@ mod tests {
 
         let live = normalize(&service).unwrap();
         assert_eq!(live.attributes["vpc_security_group_ids"], json!([]));
+        assert_eq!(live.attributes["subnet_ids"], json!([]));
     }
 
     #[test]

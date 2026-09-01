@@ -16,6 +16,12 @@
 //! absent — that normalizes to an empty membership list, not a skipped
 //! function; a function gaining VPC config (and a trusted security group
 //! along with it) outside Terraform is itself real drift to catch.
+//!
+//! `subnet_ids` is also normalized (a VPC-attached function can span
+//! multiple subnets, one ENI per subnet/AZ) but not compared for behavioral
+//! drift — `diff::behavioral` already skips every field on this kind, since
+//! it has no `FIELDS` entry at all. It exists to let a future semantic
+//! relation resolve which network ACLs govern a function.
 
 use aws_sdk_lambda::error::DisplayErrorContext;
 use aws_sdk_lambda::types::FunctionConfiguration;
@@ -58,10 +64,15 @@ fn normalize(function: &FunctionConfiguration) -> Option<LiveResource> {
                 .collect()
         })
         .unwrap_or_default();
+    let subnet_ids: Vec<&str> = function
+        .vpc_config()
+        .map(|vpc_config| vpc_config.subnet_ids().iter().map(String::as_str).collect())
+        .unwrap_or_default();
 
     let mut attributes = Map::new();
     attributes.insert("id".into(), json!(name));
     attributes.insert("vpc_security_group_ids".into(), json!(security_group_ids));
+    attributes.insert("subnet_ids".into(), json!(subnet_ids));
 
     Some(LiveResource {
         cloud_id: name,
@@ -82,6 +93,8 @@ mod tests {
                 VpcConfigResponse::builder()
                     .security_group_ids("sg-1111")
                     .security_group_ids("sg-2222")
+                    .subnet_ids("subnet-1111")
+                    .subnet_ids("subnet-2222")
                     .build(),
             )
             .build()
@@ -98,6 +111,10 @@ mod tests {
             live.attributes["vpc_security_group_ids"],
             json!(["sg-1111", "sg-2222"])
         );
+        assert_eq!(
+            live.attributes["subnet_ids"],
+            json!(["subnet-1111", "subnet-2222"])
+        );
     }
 
     #[test]
@@ -109,6 +126,7 @@ mod tests {
 
         let live = normalize(&function).unwrap();
         assert_eq!(live.attributes["vpc_security_group_ids"], json!([]));
+        assert_eq!(live.attributes["subnet_ids"], json!([]));
     }
 
     #[test]
