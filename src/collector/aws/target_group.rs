@@ -21,10 +21,17 @@
 //! **Deliberately minimal**, same discipline as `load_balancer.rs`: only
 //! `id` (the ARN), `load_balancer_arns` (passed through — the API already
 //! gives the owning load balancer directly, no `DescribeListeners` or port
-//! routing needed), and `targets` are normalized. Full behavioral tracking
-//! of a target group's other attributes (health check config, port,
+//! routing needed), `targets`, and `port` are normalized. Full behavioral
+//! tracking of a target group's other attributes (health check config,
 //! protocol, ...) is unhandled; `diff::behavioral` skips any kind with no
 //! `FIELDS` entry, so this is silent by design.
+//!
+//! `port` — the port a target group forwards to, a flat top-level argument
+//! on both `aws_lb_target_group` and the API response, no normalization
+//! needed — exists to let a future relation know what port actually reaches
+//! a registered target, distinct from whatever port the internet reached
+//! the load balancer on. A group with no port (some `lambda`-type target
+//! groups have none) normalizes to `0`.
 //!
 //! **`targets` is only populated for `instance`-type target groups.** `ip`
 //! targets aren't a resource this graph models yet; `lambda` and `alb`
@@ -109,6 +116,7 @@ fn normalize(tg: &TargetGroup, targets: Vec<String>) -> Option<LiveResource> {
     attributes.insert("id".into(), json!(arn));
     attributes.insert("load_balancer_arns".into(), json!(tg.load_balancer_arns()));
     attributes.insert("targets".into(), json!(targets));
+    attributes.insert("port".into(), json!(tg.port().unwrap_or(0)));
 
     Some(LiveResource {
         cloud_id: arn,
@@ -128,6 +136,7 @@ mod tests {
             )
             .target_group_name("my-targets")
             .target_type(TargetTypeEnum::Instance)
+            .port(8080)
             .load_balancer_arns(
                 "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/1234567890abcdef",
             )
@@ -153,12 +162,25 @@ mod tests {
             ])
         );
         assert_eq!(live.attributes["targets"], json!(["i-1111", "i-2222"]));
+        assert_eq!(live.attributes["port"], 8080);
     }
 
     #[test]
     fn a_target_group_with_no_registered_targets_normalizes_to_an_empty_list() {
         let live = normalize(&instance_target_group(), Vec::new()).unwrap();
         assert_eq!(live.attributes["targets"], json!([]));
+    }
+
+    #[test]
+    fn a_target_group_with_no_port_normalizes_to_zero() {
+        let lambda_tg = TargetGroup::builder()
+            .target_group_arn(
+                "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/lambda-targets/aaaaaaaaaaaaaaaa",
+            )
+            .target_type(TargetTypeEnum::Lambda)
+            .build();
+        let live = normalize(&lambda_tg, Vec::new()).unwrap();
+        assert_eq!(live.attributes["port"], 0);
     }
 
     #[test]
