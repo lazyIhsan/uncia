@@ -446,12 +446,16 @@ passes and owns disjointness, mirroring how `state::parse` dispatches while
 ## Out of scope
 
 - **Packet-level reachability.** Whether traffic *actually* flows involves
-  route tables, NACLs, and peering. Semantic drift reports that a trust
-  relationship changed meaning, not that a packet arrives — this still holds
-  for the `internet_reachability` relation that shipped after this document:
-  it walks a bounded security-group and load-balancer chain, not the
-  network layer, so NACLs, route tables, and peering remain out of scope
-  and are tracked as such in `ARCHITECTURE.md`'s expansion path.
+  route tables and peering, and (partially) network ACLs. Semantic drift
+  reports that a trust relationship changed meaning, not that a packet
+  arrives — this still holds for the `internet_reachability` relation that
+  shipped after this document: it walks a bounded security-group and
+  load-balancer chain, not the network layer. NACLs are a partial exception,
+  added later: their *ordered* `allow`/`deny` rules are evaluated at the
+  subject's own subnet boundary (`src/diff/semantic/nacl.rs`), but only
+  ingress, only a literal CIDR/port-range match rather than real address
+  arithmetic, and never route tables or peering — those remain fully out of
+  scope and are tracked as such in `ARCHITECTURE.md`'s expansion path.
 - **Cross-account and cross-region graphs.** Single account, single region.
   *Revisit once a relation genuinely needs it; the graph is keyed by cloud ID,
   which is not globally unique across accounts, so this is a real change.*

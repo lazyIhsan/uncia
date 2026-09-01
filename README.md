@@ -101,6 +101,11 @@ for scanning, one ordered as the path was actually walked — so "internet to
 your database, here's the exact chain" is checkable against the account, not
 just asserted.
 
+Where a network ACL governs the subject's subnet, `internet_reachability`
+checks that too, not just security groups: an ACL that used to block the
+port a chain walks through — and gets loosened outside Terraform — is real
+new exposure that no security-group field would ever show as changed.
+
 Every semantic finding carries the `via` path that produced it, so the claim is
 checkable against your account without reading uncia's source.
 
@@ -118,7 +123,7 @@ Pre-1.0, actively developed, no packaged releases yet.
 | | |
 |---|---|
 | Declared-state inputs | `terraform show -json`, `tofu show -json`, raw `.tfstate` (auto-detected) |
-| Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules), Load Balancers, Target Groups (registered targets), Lambda functions, RDS instances, ECS services |
+| Live collectors | AWS only — EC2 instances, Security Groups (inline *and* separately-declared rules), Load Balancers, Target Groups (registered targets), Lambda functions, RDS instances, ECS services, Network ACLs |
 | Drift detection | Behavioral (literal field diff) + semantic (security-group membership, instance exposure, internet reachability) |
 | History / TUI | In progress (`src/store`, `src/tui`), not yet wired to the CLI |
 

@@ -146,10 +146,21 @@ service each carry security groups exactly like an instance carries
 relation-specific code, and `internet_reachability` can report a finding
 directly on one of them as the subject — "internet reaches your database" is
 provable against a real RDS instance, not just a stand-in EC2 instance
-downstream of it. Still ahead:
+downstream of it. `internet_reachability` also now consults network ACLs at
+the subject's own subnet boundary — a security-group rule can be declared
+correctly and still not matter if a NACL blocks it, and the reverse is the
+real drift case: a NACL that used to block traffic gets loosened outside
+Terraform, and exposure grows even though every security-group field
+involved stays byte-identical. `src/diff/semantic/nacl.rs` evaluates a
+NACL's ordered `allow`/`deny` rules — the opposite shape of an unordered
+security group — against the specific port each hop of a chain actually
+carries, threaded through `reachability.rs`'s walk rather than assumed
+constant end to end, since a trust hop or a load-balancer registration can
+each land on a different port than the one before it. RDS isn't covered
+yet: resolving which subnet an RDS instance is actually in needs its own
+`aws_db_subnet_group` collector, not just a field on the existing one.
+Still ahead:
 
-- NACL interaction — a security-group rule can be declared correctly and
-  still not matter if a NACL blocks it
 - a route table or peering change that alters what a CIDR range in a rule
   actually reaches
 
